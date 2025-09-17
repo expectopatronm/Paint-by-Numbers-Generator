@@ -17,6 +17,7 @@ This project converts any input image into a structured **paint-by-numbers guide
 <p align="center">
   <img src="docs/Screenshot%202025-09-18%20003813.png" width="90%" />
 </p>
+
 ---
 
 ## 1. Color Clustering (Image Simplification)
@@ -29,6 +30,7 @@ This project converts any input image into a structured **paint-by-numbers guide
 <p align="center">
   <img src="docs/Screenshot%202025-09-18%20003932.png" width="75%" />
 </p>
+
 ---
 
 ## 2. Mapping to Real Paints
