@@ -1,6 +1,11 @@
 
 # Paint-by-Numbers Generator
 
+<p align="center">
+  <img src="docs/Screenshot%202025-09-18%20003029.png" width="45%" />
+  <img src="docs/Screenshot%202025-09-18%20003107.png" width="45%" />
+</p>
+
 This project converts any input image into a structured **paint-by-numbers guide**, complete with:
 
 - **Simplified color clusters** (via K-Means).
