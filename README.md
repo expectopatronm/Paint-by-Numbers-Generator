@@ -10,6 +10,11 @@ This project converts any input image into a structured **paint-by-numbers guide
 
 - **Simplified color clusters** (via K-Means).
 - **Mixing recipes** using a fixed set of real paint colors (Titanium White, Lemon Yellow, Vermillion Red, Carmine, Ultramarine, Pthalo Green, Yellow Ochre, Lamp Black).
+
+<p align="center">
+  <img src="docs/Screenshot%202025-09-18%20003932.png" width="75%" />
+</p>
+
 - **Component swatches** to visualize which paints contribute to each cluster.
 - **Progress frames** that guide the painting process step-by-step (Darks → Midtones → Neutrals → Highlights → Completed).
 - A clean **A4 landscape PDF** output where each page contains both the working image for that stage and the matching color key.
@@ -26,10 +31,6 @@ This project converts any input image into a structured **paint-by-numbers guide
 2. K-Means clustering groups all pixels into a fixed number of clusters (e.g., 15 colors).
 3. Each cluster centroid becomes a “paint number” — a representative color in the paint-by-numbers map.
 4. The clustered image is then **upsampled back to the original resolution** with nearest-neighbor interpolation, ensuring each pixel is assigned to a single cluster region.
-
-<p align="center">
-  <img src="docs/Screenshot%202025-09-18%20003932.png" width="75%" />
-</p>
 
 ---
 
