@@ -53,6 +53,15 @@ Instead, we solve for **mixing ratios** of your available paints:
 
 - Each recipe is paired with **small swatches of the contributing paints**, so you see exactly what goes in.
 
+- Each legend entry also shows:  
+  - **CIE L\*** (lightness / value) of the cluster  
+  - If multiple clusters reduce to the same rounded recipe, **value tweaks** are suggested:  
+    - `+ tiny White` → mix slightly lighter  
+    - `+ tiny Black` → mix slightly darker  
+    - `none (base)` → use the baseline recipe as-is  
+
+This ensures visually similar clusters remain distinguishable when painting.
+
 ---
 
 ## 3. Progress Frames (Painting Order)
@@ -96,7 +105,12 @@ This sequencing reflects classical oil painting logic:
   - Right column: Full color key for all clusters.  
 - **Pages 2+:**  
   - Left: One progress frame (darks, mids, neutrals, etc.).  
-  - Right: A frame-specific key showing **only the clusters used in that frame**, with their recipes and swatches.
+  - Right: A frame-specific key showing **only the clusters used in that frame**, with their recipes and swatches.  
+
+### Legend Improvements
+- **Wrapped text** prevents long recipes from overlapping the figures.  
+- **L\*** and **value tweak** hints are displayed for each cluster, ensuring clarity when clusters share the same mix.  
+- Component swatches are shown in a consistent palette order.  
 
 This makes the PDF usable both as an **overall map** and as a **step-by-step workbook**.
 
@@ -118,7 +132,8 @@ This makes the PDF usable both as an **overall map** and as a **step-by-step wor
 - **NNLS mixing** ensures recipes are realistic (no negative paint).  
 - **Linear RGB math** makes color approximation perceptually accurate.  
 - **Progress frames** mimic a painter’s natural workflow, turning a flat “coloring book” into a logical painting roadmap.  
-- **PDF layout** makes the guide easy to follow at the easel.
+- **Value tweaks and L\*** values keep near-identical mixes visually distinct.  
+- **Wrapped PDF legends** make the guide easy to read at the easel.  
 
 ---
 
