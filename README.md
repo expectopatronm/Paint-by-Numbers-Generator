@@ -14,8 +14,9 @@ This project converts any input image into a structured **paint-by-numbers guide
 - **Progress frames** that guide the painting process step-by-step (Darks → Midtones → Neutrals → Highlights → Completed).
 - A clean **A4 landscape PDF** output where each page contains both the working image for that stage and the matching color key.
 
-This README emphasizes **how it works and why**, rather than just how to run it.
-
+<p align="center">
+  <img src="docs/Screenshot%202025-09-18%20003813.png" width="90%" />
+</p>
 ---
 
 ## 1. Color Clustering (Image Simplification)
@@ -25,6 +26,9 @@ This README emphasizes **how it works and why**, rather than just how to run it.
 3. Each cluster centroid becomes a “paint number” — a representative color in the paint-by-numbers map.
 4. The clustered image is then **upsampled back to the original resolution** with nearest-neighbor interpolation, ensuring each pixel is assigned to a single cluster region.
 
+<p align="center">
+  <img src="docs/Screenshot%202025-09-18%20003932.png" width="75%" />
+</p>
 ---
 
 ## 2. Mapping to Real Paints
