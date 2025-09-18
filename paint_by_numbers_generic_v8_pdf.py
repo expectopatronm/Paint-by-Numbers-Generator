@@ -133,7 +133,7 @@ def build_value_tweaks(palette, recipes_text):
     return tweaks
 
 # ---------- Original edge sketch with grid ----------
-def original_edge_sketch_with_grid(img: Image.Image, grid_step: int = 80, threshold_percentile: float = 25.0):
+def original_edge_sketch_with_grid(img: Image.Image, grid_step: int = 80, threshold_percentile: float = 85.0):
     """Return a PIL Image of an edge sketch (black on white) with light gray grid overlay."""
     arr = np.array(img.convert("RGB"))
     # grayscale
