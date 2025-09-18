@@ -12,7 +12,7 @@ This project converts any input image into a structured **paint-by-numbers guide
 - **Mixing recipes** using a fixed set of real paint colors (Titanium White, Lemon Yellow, Vermillion Red, Carmine, Ultramarine, Pthalo Green, Yellow Ochre, Lamp Black).
 
 <p align="center">
-  <img src="docs/Screenshot%202025-09-18%20003932.png" width="45%" />
+  <img src="docs/Screenshot%202025-09-18%20003932.png" width="75%" />
 </p>  
 
 - **Advanced mixing models** (`--mix-model`) to better approximate real paint behavior.
