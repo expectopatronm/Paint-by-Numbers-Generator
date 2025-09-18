@@ -2,18 +2,32 @@
 # Paint-by-Numbers Generator
 
 <p align="center">
-  <img src="docs/Screenshot_overview.png" width="45%" />
-  <img src="docs/Screenshot_frame.png" width="45%" />
+  <img src="docs/Screenshot%202025-09-18%20003029.png" width="45%" />
+  <img src="docs/Screenshot%202025-09-18%20003107.png" width="45%" />
 </p>
 
 This project converts any input image into a structured **paint-by-numbers guide**, complete with:
 
 - **Simplified color clusters** (via K-Means).
 - **Mixing recipes** using a fixed set of real paint colors (Titanium White, Lemon Yellow, Vermillion Red, Carmine, Ultramarine, Pthalo Green, Yellow Ochre, Lamp Black).
+
+<p align="center">
+  <img src="docs/Screenshot%202025-09-18%20003932.png" width="45%" />
+</p>  
+
 - **Advanced mixing models** (`--mix-model`) to better approximate real paint behavior.
 - **Progress frames** that guide the painting process step-by-step (Darks → Midtones → Neutrals → Highlights → Completed).
+
+<p align="center">
+  <img src="docs/Screenshot%202025-09-18%20003813.png" width="85%" />
+</p> 
+
 - A clean **A4 landscape PDF** output where each page contains both the working image for that stage and the matching color key.
 - An **edge sketch + grid page** to use for initial drawing transfer.
+
+<p align="center">
+  <img src="docs/Screenshot%202025-09-18%20094714.png" width="45%" />
+</p>
 
 ---
 
