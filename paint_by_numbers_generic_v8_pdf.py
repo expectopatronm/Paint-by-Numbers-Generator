@@ -291,9 +291,9 @@ def main():
     parser.add_argument("input", help="Input image file path")
     parser.add_argument("--pdf", default="paint_by_numbers_guide.pdf", help="Output PDF path")
     parser.add_argument("--colors", type=int, default=20)
-    parser.add_argument("--resize", type=int, nargs=2, default=[120, 120], metavar=("W", "H"))
+    parser.add_argument("--resize", type=int, nargs=2, default=[240, 240], metavar=("W", "H"))
     parser.add_argument("--palette", nargs="*", default=list(BASE_PALETTE.keys()))
-    parser.add_argument("--components", type=int, default=3)
+    parser.add_argument("--components", type=int, default=5)
     parser.add_argument("--max-parts", type=int, default=10)
     parser.add_argument("--mix-model", choices=["linear","lab","subtractive","km"], default="km")
     parser.add_argument("--frame-mode", choices=["classic","value5","both","combined"], default="combined",
