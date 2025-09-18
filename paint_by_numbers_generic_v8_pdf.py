@@ -1,4 +1,3 @@
-
 import argparse
 import os
 import numpy as np
@@ -9,6 +8,7 @@ from matplotlib.gridspec import GridSpec
 from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.cluster import KMeans
 from scipy.optimize import nnls
+from scipy import ndimage as ndi
 import textwrap
 
 # -----------------------------
@@ -132,6 +132,32 @@ def build_value_tweaks(palette, recipes_text):
                 tweaks[ci] = "Value tweak: none (base)"
     return tweaks
 
+# ---------- Original edge sketch with grid ----------
+def original_edge_sketch_with_grid(img: Image.Image, grid_step: int = 80, threshold_percentile: float = 25.0):
+    """Return a PIL Image of an edge sketch (black on white) with light gray grid overlay."""
+    arr = np.array(img.convert("RGB"))
+    # grayscale
+    gray = np.dot(arr[..., :3], [0.2989, 0.5870, 0.1140]).astype(np.float32)
+    # Sobel gradients
+    gx = ndi.sobel(gray, axis=1, mode='reflect')
+    gy = ndi.sobel(gray, axis=0, mode='reflect')
+    mag = np.hypot(gx, gy)
+    if mag.max() > 0:
+        mag = mag / mag.max()
+    # threshold
+    t = np.percentile(mag, threshold_percentile)
+    edges = (mag >= t).astype(np.uint8) * 255  # 255 = edge
+    # invert to black-on-white lines
+    sketch = 255 - edges  # 0 = black lines, 255 = white background
+    h, w = sketch.shape
+    # overlay grid (light gray)
+    grid_color = 200
+    for x in range(0, w, grid_step):
+        sketch[:, x:x+1] = grid_color
+    for y in range(0, h, grid_step):
+        sketch[y:y+1, :] = grid_color
+    return Image.fromarray(sketch.astype(np.uint8))
+
 # ---------- Drawing helpers (with wrapping) ----------
 def draw_color_key(ax, palette, recipes, entries_per_color, base_palette, used_indices=None,
                    title="Color Key • Ratios + Component Paints", tweaks=None, wrap_width=55):
@@ -153,7 +179,6 @@ def draw_color_key(ax, palette, recipes, entries_per_color, base_palette, used_i
         if tweaks.get(ci, ""):
             tweak_str += f"  • {tweaks[ci]}"
 
-        # Wrap the text to avoid overflow
         text_str = f"{ci+1}: {recipe}{tweak_str}"
         wrapped = textwrap.fill(text_str, width=wrap_width)
         ax.text(1.3, row_idx+0.5, wrapped, va="center", fontsize=8, wrap=True)
@@ -176,21 +201,26 @@ def draw_color_key(ax, palette, recipes, entries_per_color, base_palette, used_i
 
 # ---------- Main ----------
 def main():
-    parser = argparse.ArgumentParser(description="A4 landscape PDF with wrapped legend text and value tweaks.")
+    parser = argparse.ArgumentParser(description="A4 landscape PDF with edge-sketch page (original) + wrapped legends and value tweaks.")
     parser.add_argument("input", help="Input image file path")
     parser.add_argument("--pdf", default="paint_by_numbers_guide.pdf", help="Output PDF path")
-    parser.add_argument("--colors", type=int, default=15, help="Number of colors for KMeans")
+    parser.add_argument("--colors", type=int, default=20, help="Number of colors for KMeans")
     parser.add_argument("--resize", type=int, nargs=2, default=[120, 120], metavar=("W", "H"),
                         help="Resize (width height) used ONLY for clustering speed")
     parser.add_argument("--palette", nargs="*", default=list(BASE_PALETTE.keys()),
                         help="Subset/order of base paints to use (default: all)")
     parser.add_argument("--components", type=int, default=4, help="Max number of component paints to show per recipe")
     parser.add_argument("--wrap", type=int, default=55, help="Wrap width for legend text")
+    parser.add_argument("--grid-step", type=int, default=80, help="Grid spacing in pixels for the original edge sketch page")
+    parser.add_argument("--edge-percentile", type=float, default=85.0, help="Percentile threshold (0-100) for edge detection sensitivity")
     args = parser.parse_args()
 
     # Load full original
     img = Image.open(args.input).convert("RGB")
     orig_w, orig_h = img.size
+
+    # Build edge sketch (Option B) for page 2
+    sketch_img = original_edge_sketch_with_grid(img, grid_step=args.grid_step, threshold_percentile=args.edge_percentile)
 
     # Downsample ONLY for clustering
     img_small = img.resize(tuple(args.resize), resample=Image.BILINEAR)
@@ -251,7 +281,7 @@ def main():
     # ----- Build PDF (A4 Landscape) -----
     A4_LANDSCAPE = (11.69, 8.27)
     with PdfPages(args.pdf) as pdf:
-        # Page 1: Original above PBN (left), overall Key (right spanning)
+        # Page 1: Overview (Original above PBN, full key on right)
         fig = plt.figure(figsize=A4_LANDSCAPE)
         gs = GridSpec(2, 2, width_ratios=[1,1.6], figure=fig)
         ax1 = fig.add_subplot(gs[0,0])
@@ -264,24 +294,29 @@ def main():
                        used_indices=list(range(args.colors)),
                        title="Color Key • All Clusters (with L* + Value Tweaks)",
                        tweaks=tweaks, wrap_width=args.wrap)
-
         plt.tight_layout(); pdf.savefig(fig, dpi=300); plt.close(fig)
 
-        # Per-frame pages with wrapped legend text
+        # Page 2: Original Edge Sketch with Grid
+        fig = plt.figure(figsize=A4_LANDSCAPE)
+        ax = fig.add_subplot(111)
+        ax.imshow(sketch_img, cmap='gray')
+        ax.set_title(f"Original Edge Sketch + Grid (step={args.grid_step}px, percentile={args.edge_percentile:.0f})")
+        ax.axis("off")
+        plt.tight_layout(); pdf.savefig(fig, dpi=300); plt.close(fig)
+
+        # Remaining pages: per-frame image + per-frame key
         for title, idxs, frame in progress_frames:
             fig = plt.figure(figsize=A4_LANDSCAPE)
             gs = GridSpec(1, 2, width_ratios=[1, 1.6], figure=fig)
             axL = fig.add_subplot(gs[0,0]); axR = fig.add_subplot(gs[0,1])
-
             axL.imshow(frame); axL.set_title(title); axL.axis("off")
             draw_color_key(axR, palette, all_recipes, all_entries, BASE_PALETTE,
                            used_indices=idxs,
                            title=f"Color Key • {title} (with L* + Value Tweaks)",
                            tweaks=tweaks, wrap_width=args.wrap)
-
             plt.tight_layout(); pdf.savefig(fig, dpi=300); plt.close(fig)
 
-    print(f"✅ Saved A4 landscape PDF with wrapped legend text to {args.pdf}")
+    print(f"✅ Saved A4 landscape PDF with edge-sketch page to {args.pdf}")
 
 if __name__ == "__main__":
     main()
