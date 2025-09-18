@@ -1,4 +1,3 @@
-
 import argparse
 import itertools
 import numpy as np
@@ -195,9 +194,9 @@ def group_value5(palette):
     L = np.array([relative_luminance(c) for c in palette])
     q10, q25, q70, q85 = np.quantile(L, [0.10, 0.25, 0.70, 0.85])
     deep = [i for i in range(len(palette)) if L[i] <= q10]
-    core = [i for i in range(len(palette)) if (L[i] > q10 and L[i] <= q25)]
-    mids = [i for i in range(len(palette)) if (L[i] > q25 and L[i] <= q70)]
-    half = [i for i in range(len(palette)) if (L[i] > q70 and L[i] <= q85)]
+    core = [i for i in range(len(palette)) if (q10 < L[i] <= q25)]
+    mids = [i for i in range(len(palette)) if (q25 < L[i] <= q70)]
+    half = [i for i in range(len(palette)) if (q70 < L[i] <= q85)]
     highs = [i for i in range(len(palette)) if L[i] > q85]
     return {"deep": deep, "core": core, "mids": mids, "half": half, "highs": highs}
 
@@ -330,6 +329,7 @@ def main():
         all_recipes.append(recipe_text(entries))
         approx_rgbs.append(np.array(approx_rgb, dtype=float))
         deltaEs.append(err)
+
     approx_uint8 = np.clip(np.rint(np.array(approx_rgbs)), 0, 255).astype(np.uint8)
 
     seg_mixed_small = approx_uint8[labels_small]
@@ -413,15 +413,21 @@ def main():
         ax1 = fig.add_subplot(gs[0,0])
         ax2 = fig.add_subplot(gs[1,0])
         ax3 = fig.add_subplot(gs[:,1])
-        ax1.imshow(img); ax1.set_title("Original"); ax1.axis("off")
-        ax2.imshow(pbn_image); ax2.set_title(f"Paint by Numbers ({args.colors} colors) • model={args.mix_model} • max parts={args.max_parts}"); ax2.axis("off")
+        ax1.imshow(img)
+        ax1.set_title("Original")
+        ax1.axis("off")
+        ax2.imshow(pbn_image)
+        ax2.set_title(f"Paint by Numbers ({args.colors} colors) • model={args.mix_model} • max parts={args.max_parts}")
+        ax2.axis("off")
         draw_color_key(ax3, target_palette, all_recipes, all_entries, BASE_PALETTE,
                        used_indices=list(range(args.colors)),
                        title=f"Color Key • All Clusters",
                        tweaks=tweaks, wrap_width=args.wrap,
                        show_components=not args.hide_components,
                        deltaEs=deltaEs)
-        plt.tight_layout(); pdf.savefig(fig, dpi=300); plt.close(fig)
+        plt.tight_layout()
+        pdf.savefig(fig, dpi=300)
+        plt.close(fig)
 
         # Page 2: Edge sketch
         fig = plt.figure(figsize=A4_LANDSCAPE)
@@ -429,27 +435,38 @@ def main():
         ax.imshow(sketch_img, cmap='gray')
         ax.set_title(f"Original Edge Sketch + Grid (step={args.grid_step}px, percentile={args.edge_percentile:.0f})")
         ax.axis("off")
-        plt.tight_layout(); pdf.savefig(fig, dpi=300); plt.close(fig)
+        plt.tight_layout()
+        pdf.savefig(fig, dpi=300)
+        plt.close(fig)
 
         # Emit frames in chosen mode
         for title, idxs, frame in frames_to_emit:
             fig = plt.figure(figsize=A4_LANDSCAPE)
             gs = GridSpec(1, 2, width_ratios=[1, 1.6], figure=fig)
-            axL = fig.add_subplot(gs[0,0]); axR = fig.add_subplot(gs[0,1])
-            axL.imshow(frame); axL.set_title(title); axL.axis("off")
+            axL = fig.add_subplot(gs[0,0])
+            axR = fig.add_subplot(gs[0,1])
+            axL.imshow(frame)
+            axL.set_title(title)
+            axL.axis("off")
             draw_color_key(axR, target_palette, all_recipes, all_entries, BASE_PALETTE,
                            used_indices=idxs,
                            title=f"Color Key • {title}",
                            tweaks=tweaks, wrap_width=args.wrap,
                            show_components=not args.hide_components,
                            deltaEs=deltaEs)
-            plt.tight_layout(); pdf.savefig(fig, dpi=300); plt.close(fig)
+            plt.tight_layout()
+            pdf.savefig(fig, dpi=300)
+            plt.close(fig)
 
         # Completed page
         fig = plt.figure(figsize=A4_LANDSCAPE)
         ax = fig.add_subplot(111)
-        ax.imshow(pbn_image); ax.set_title("Completed — All Colors Applied"); ax.axis("off")
-        plt.tight_layout(); pdf.savefig(fig, dpi=300); plt.close(fig)
+        ax.imshow(pbn_image)
+        ax.set_title("Completed — All Colors Applied")
+        ax.axis("off")
+        plt.tight_layout()
+        pdf.savefig(fig, dpi=300)
+        plt.close(fig)
 
     print(f"✅ Saved A4 landscape PDF to {args.pdf} (frame-mode={args.frame_mode})")
 
