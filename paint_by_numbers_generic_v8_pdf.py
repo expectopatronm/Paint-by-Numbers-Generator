@@ -11,9 +11,6 @@ from sklearn.cluster import KMeans
 from scipy import ndimage as ndi
 import textwrap as _tw
 
-# -----------------------------
-# Base palette (approximate sRGB for tube colors)
-# -----------------------------
 BASE_PALETTE = {
     "Titanium White": (245, 245, 245),
     "Lemon Yellow": (250, 239, 80),
@@ -25,9 +22,6 @@ BASE_PALETTE = {
     "Lamp Black": (20, 20, 20),
 }
 
-# -----------------------------
-# Color-space utilities
-# -----------------------------
 def srgb_to_linear_arr(rgb_arr):
     rgb_arr = np.clip(rgb_arr / 255.0, 0, 1)
     return np.where(rgb_arr <= 0.04045, rgb_arr / 12.92, ((rgb_arr + 0.055)/1.055) ** 2.4)
@@ -36,7 +30,6 @@ def linear_to_srgb_arr(lin):
     lin = np.clip(lin, 0, 1)
     return np.where(lin <= 0.0031308, 12.92*lin, 1.055*np.power(lin, 1/2.4) - 0.055)
 
-# XYZ/Lab conversions (D65, sRGB)
 def srgb_to_xyz(rgb):
     lin = srgb_to_linear_arr(rgb/255.0)
     M = np.array([[0.4124564, 0.3575761, 0.1804375],
@@ -89,9 +82,6 @@ def relative_luminance(rgb):
 def Lstar_from_rgb(rgb):
     return float(np.clip(rgb_to_lab(np.array(rgb, float))[0], 0, 100))
 
-# -----------------------------
-# Mixing models
-# -----------------------------
 def mix_linear(parts, base_rgbs):
     w = parts / np.sum(parts)
     lin = np.sum(srgb_to_linear_arr(base_rgbs.T) * w, axis=1)
@@ -129,9 +119,6 @@ def mix_color(parts, base_rgbs, model):
     else:
         return mix_linear(parts, base_rgbs)
 
-# -----------------------------
-# Integer optimizer (minimizes ΔE in Lab)
-# -----------------------------
 def enumerate_partitions(total, k):
     if k == 1:
         yield (total,)
@@ -176,9 +163,6 @@ def integer_mix_best(target_rgb, base_names, max_parts=5, max_components=3, mode
 def recipe_text(entries):
     return " + ".join([f"{p} part{'s' if p != 1 else ''} {n}" for n, p in entries]) if entries else "—"
 
-# -----------------------------
-# Grouping, tweaks, sketch
-# -----------------------------
 def rgb_to_hsv(rgb):
     rgb = np.array(rgb, dtype=float) / 255.0
     mx = rgb.max(); mn = rgb.min()
@@ -195,7 +179,7 @@ def rgb_to_hsv(rgb):
     v = mx
     return h, s, v
 
-def auto_group_clusters(palette):
+def group_classic(palette):
     n = len(palette)
     lums = np.array([relative_luminance(c) for c in palette])
     sats = np.array([rgb_to_hsv(c)[1] for c in palette])
@@ -206,6 +190,16 @@ def auto_group_clusters(palette):
     neutrals = [i for i in range(n) if (sats[i] <= 0.20) and (i not in highs)]
     mids = [i for i in range(n) if i not in darks and i not in highs and i not in neutrals]
     return {"darks": darks, "mids": mids, "neutrals": neutrals, "highs": highs}
+
+def group_value5(palette):
+    L = np.array([relative_luminance(c) for c in palette])
+    q10, q25, q70, q85 = np.quantile(L, [0.10, 0.25, 0.70, 0.85])
+    deep = [i for i in range(len(palette)) if L[i] <= q10]
+    core = [i for i in range(len(palette)) if (L[i] > q10 and L[i] <= q25)]
+    mids = [i for i in range(len(palette)) if (L[i] > q25 and L[i] <= q70)]
+    half = [i for i in range(len(palette)) if (L[i] > q70 and L[i] <= q85)]
+    highs = [i for i in range(len(palette)) if L[i] > q85]
+    return {"deep": deep, "core": core, "mids": mids, "half": half, "highs": highs}
 
 def build_value_tweaks(palette, recipes_text):
     groups = {}
@@ -246,9 +240,6 @@ def original_edge_sketch_with_grid(img, grid_step=80, threshold_percentile=75.0)
         sketch[y:y+1, :] = grid_color
     return Image.fromarray(sketch.astype(np.uint8))
 
-# -----------------------------
-# Drawing (single swatch, optional components)
-# -----------------------------
 def draw_color_key(ax, target_palette, recipes, entries_per_color, base_palette, used_indices=None,
                    title="Color Key • Ratios + Component Paints", tweaks=None, wrap_width=55,
                    show_components=True, deltaEs=None):
@@ -264,9 +255,7 @@ def draw_color_key(ax, target_palette, recipes, entries_per_color, base_palette,
         recipe = recipes[ci]
         entries = entries_per_color[ci]
 
-        # Single square swatch of target color
         ax.add_patch(Rectangle((0, row_idx), 1, 1, color=(target_color/255), ec="k", lw=0.2))
-        # Row number overlay
         ax.text(0.5, row_idx+0.5, f"{ci+1}", ha="center", va="center", fontsize=8, color="black",
                 bbox=dict(facecolor=(1,1,1,0.45), edgecolor='none', boxstyle='round,pad=0.1'))
 
@@ -297,46 +286,39 @@ def draw_color_key(ax, target_palette, recipes, entries_per_color, base_palette,
     ax.axis("off")
     ax.set_title(title + "  (single swatch = target color)")
 
-# -----------------------------
-# Main
-# -----------------------------
 def main():
-    parser = argparse.ArgumentParser(description="A4 PDF with robust PBN recoloring, index-based masks, and advanced mixing.")
+    parser = argparse.ArgumentParser(description="A4 PDF with classic, value5, or combined 9-step frames.")
     parser.add_argument("input", help="Input image file path")
     parser.add_argument("--pdf", default="paint_by_numbers_guide.pdf", help="Output PDF path")
-    parser.add_argument("--colors", type=int, default=20, help="Number of clusters for KMeans")
-    parser.add_argument("--resize", type=int, nargs=2, default=[120, 120], metavar=("W", "H"),
-                        help="Working size for clustering (speed/quality tradeoff)")
+    parser.add_argument("--colors", type=int, default=20)
+    parser.add_argument("--resize", type=int, nargs=2, default=[120, 120], metavar=("W", "H"))
     parser.add_argument("--palette", nargs="*", default=list(BASE_PALETTE.keys()))
-    parser.add_argument("--components", type=int, default=3, help="Max component paints per recipe (integer mode)")
-    parser.add_argument("--max-parts", type=int, default=10, help="Total integer parts per recipe (cap)")
-    parser.add_argument("--mix-model", choices=["linear","lab","subtractive","km"], default="km",
-                        help="Mixing model for integer recipe evaluation (default: km)")
-    parser.add_argument("--wrap", type=int, default=55, help="Wrap width for legend text")
-    parser.add_argument("--grid-step", type=int, default=80, help="Grid spacing in pixels for edge sketch page")
-    parser.add_argument("--edge-percentile", type=float, default=85.0, help="Percentile threshold for edge detection")
-    parser.add_argument("--hide-components", action="store_true", help="Hide component swatches on the right")
+    parser.add_argument("--components", type=int, default=3)
+    parser.add_argument("--max-parts", type=int, default=10)
+    parser.add_argument("--mix-model", choices=["linear","lab","subtractive","km"], default="km")
+    parser.add_argument("--frame-mode", choices=["classic","value5","both","combined"], default="combined",
+                        help="Frame set: classic (4+complete), value5 (5), both (separate), or combined (interleaved 9-step)")
+    parser.add_argument("--wrap", type=int, default=55)
+    parser.add_argument("--grid-step", type=int, default=80)
+    parser.add_argument("--edge-percentile", type=float, default=85.0)
+    parser.add_argument("--hide-components", action="store_true")
     args = parser.parse_args()
 
-    # Load original
     img = Image.open(args.input).convert("RGB")
     orig_w, orig_h = img.size
 
-    # Edge sketch page
     sketch_img = original_edge_sketch_with_grid(img, grid_step=args.grid_step, threshold_percentile=args.edge_percentile)
 
-    # --- KMeans (on downsample) ---
     img_small = img.resize(tuple(args.resize), resample=Image.BILINEAR)
     data_small = np.array(img_small)
     Hs, Ws, _ = data_small.shape
     pixels_small = data_small.reshape((-1, 3))
 
     kmeans = KMeans(n_clusters=args.colors, random_state=42, n_init=5).fit(pixels_small)
-    labels_small = kmeans.labels_.reshape(Hs, Ws).astype(np.uint8)  # label map at small res
-    centroids = kmeans.cluster_centers_.astype(float)               # target cluster colors (float)
-    target_palette = centroids.astype(np.uint8)                     # for display
+    labels_small = kmeans.labels_.reshape(Hs, Ws).astype(np.uint8)
+    centroids = kmeans.cluster_centers_.astype(float)
+    target_palette = centroids.astype(np.uint8)
 
-    # --- Integer-optimized recipes per cluster ---
     names = args.palette
     all_entries, all_recipes, approx_rgbs, deltaEs = [], [], [], []
     for col in centroids:
@@ -348,63 +330,84 @@ def main():
         all_recipes.append(recipe_text(entries))
         approx_rgbs.append(np.array(approx_rgb, dtype=float))
         deltaEs.append(err)
-    approx_rgbs = np.array(approx_rgbs, dtype=float)  # (K, 3)
-    approx_uint8 = np.clip(np.rint(approx_rgbs), 0, 255).astype(np.uint8)
+    approx_uint8 = np.clip(np.rint(np.array(approx_rgbs)), 0, 255).astype(np.uint8)
 
-    # --- Recolor segmentation by integer-mix colors (depends on parts/components/model) ---
-    seg_mixed_small = approx_uint8[labels_small]  # (Hs, Ws, 3)
-    # Upscale label map and recolored PBN to original size
+    seg_mixed_small = approx_uint8[labels_small]
     labels_orig = Image.fromarray(labels_small, mode="L").resize((orig_w, orig_h), resample=Image.NEAREST)
     labels_orig = np.array(labels_orig, dtype=np.uint8)
     pbn_image = Image.fromarray(seg_mixed_small).resize((orig_w, orig_h), resample=Image.NEAREST)
     pbn_image = np.array(pbn_image, dtype=np.uint8)
 
-    # Grouping for frames (based on target palette tonality/saturation)
-    groups = auto_group_clusters(target_palette)
-    progress_order = [
-        ("Frame 1 – Shadows / Dark Blocks", groups["darks"]),
-        ("Frame 2 – Mid-tone Masses",       groups["mids"]),
-        ("Frame 3 – Neutrals / Background", groups["neutrals"]),
-        ("Frame 4 – Highlights",            groups["highs"]),
+    classic = group_classic(target_palette)
+    value5 = group_value5(target_palette)
+
+    # Orders
+    classic_order = [
+        ("Frame 1 – Shadows / Dark Blocks", classic["darks"]),
+        ("Frame 2 – Mid-tone Masses",       classic["mids"]),
+        ("Frame 3 – Neutrals / Background", classic["neutrals"]),
+        ("Frame 4 – Highlights",            classic["highs"]),
         ("Frame 5 – Completed",             list(range(args.colors))),
     ]
 
-    # Build per-frame images using **label indices** (robust to color rounding)
-    progress_frames = []
-    for title, idxs in progress_order:
-        if len(idxs) == 0 and "Completed" not in title:
-            continue
-        mask = np.isin(labels_orig, np.array(idxs, dtype=np.uint8))
-        frame_img = np.where(mask[..., None], pbn_image, 255).astype(np.uint8)
-        progress_frames.append((title, idxs, frame_img))
+    value5_order = [
+        ("Value A – Deep Shadows (lowest ~10%)", value5["deep"]),
+        ("Value B – Core Shadows (to ~25%)",     value5["core"]),
+        ("Value C – Midtones (to ~70%)",         value5["mids"]),
+        ("Value D – Half-Lights (to ~85%)",      value5["half"]),
+        ("Value E – Highlights (top ~15%)",      value5["highs"]),
+    ]
 
-    # Value tweaks grouping by identical recipes
-    def build_value_tweaks(palette, recipes_text):
-        groups = {}
-        for i, r in enumerate(recipes_text):
-            groups.setdefault(r, []).append(i)
-        tweaks = {i: "" for i in range(len(palette))}
-        for r, indices in groups.items():
-            if len(indices) <= 1:
+    def frames_from_order(order):
+        frames = []
+        for title, idxs in order:
+            if len(idxs) == 0:
                 continue
-            Ls = np.array([Lstar_from_rgb(palette[i]) for i in indices])
-            L_mean = Ls.mean()
-            for ci, L in zip(indices, Ls):
-                delta = L - L_mean
-                if delta > 0.5:
-                    tweaks[ci] = "Value tweak: + tiny White"
-                elif delta < -0.5:
-                    tweaks[ci] = "Value tweak: + tiny Black"
-                else:
-                    tweaks[ci] = "Value tweak: none (base)"
-        return tweaks
+            mask = np.isin(labels_orig, np.array(idxs, dtype=np.uint8))
+            frame_img = np.where(mask[..., None], pbn_image, 255).astype(np.uint8)
+            frames.append((title, idxs, frame_img))
+        return frames
+
+    if args.frame_mode == "combined":
+        # Build interleaved 9-step, subtracting already-painted indices to prevent duplicates
+        painted = set()
+        def remaining(idx_list):
+            return [i for i in idx_list if i not in painted]
+
+        sequence = [
+            ("Step 1 – Deep Shadows",          value5["deep"]),
+            ("Step 2 – Core Shadows",          value5["core"]),
+            ("Step 3 – Shadows / Dark Blocks", classic["darks"]),     # remaining darks
+            ("Step 4 – Value Midtones",        value5["mids"]),
+            ("Step 5 – Mid-tone Masses",       classic["mids"]),      # remaining mids
+            ("Step 6 – Neutrals / Background", classic["neutrals"]),
+            ("Step 7 – Half-Lights",           value5["half"]),
+            ("Step 8 – Highlights",            value5["highs"]),
+            ("Step 9 – Highlight Accents",     classic["highs"]),
+        ]
+
+        frames_combined = []
+        for title, idxs in sequence:
+            rem = remaining(idxs)
+            painted.update(rem)
+            if not rem:
+                continue
+            mask = np.isin(labels_orig, np.array(rem, dtype=np.uint8))
+            frame_img = np.where(mask[..., None], pbn_image, 255).astype(np.uint8)
+            frames_combined.append((title, rem, frame_img))
+        frames_to_emit = frames_combined
+    elif args.frame_mode == "classic":
+        frames_to_emit = frames_from_order(classic_order)
+    elif args.frame_mode == "value5":
+        frames_to_emit = frames_from_order(value5_order)
+    else:  # both
+        frames_to_emit = frames_from_order(classic_order) + frames_from_order(value5_order)
 
     tweaks = build_value_tweaks(target_palette, all_recipes)
 
-    # ----- Build PDF (A4 Landscape) -----
     A4_LANDSCAPE = (11.69, 8.27)
     with PdfPages(args.pdf) as pdf:
-        # Page 1: Overview (Original above PBN, full key on right)
+        # Page 1: Overview
         fig = plt.figure(figsize=A4_LANDSCAPE)
         gs = GridSpec(2, 2, width_ratios=[1,1.6], figure=fig)
         ax1 = fig.add_subplot(gs[0,0])
@@ -428,8 +431,8 @@ def main():
         ax.axis("off")
         plt.tight_layout(); pdf.savefig(fig, dpi=300); plt.close(fig)
 
-        # Frame pages
-        for title, idxs, frame in progress_frames:
+        # Emit frames in chosen mode
+        for title, idxs, frame in frames_to_emit:
             fig = plt.figure(figsize=A4_LANDSCAPE)
             gs = GridSpec(1, 2, width_ratios=[1, 1.6], figure=fig)
             axL = fig.add_subplot(gs[0,0]); axR = fig.add_subplot(gs[0,1])
@@ -442,7 +445,13 @@ def main():
                            deltaEs=deltaEs)
             plt.tight_layout(); pdf.savefig(fig, dpi=300); plt.close(fig)
 
-    print(f"✅ Saved A4 landscape PDF to {args.pdf} using mix-model={args.mix_model}, max-parts={args.max_parts}")
+        # Completed page
+        fig = plt.figure(figsize=A4_LANDSCAPE)
+        ax = fig.add_subplot(111)
+        ax.imshow(pbn_image); ax.set_title("Completed — All Colors Applied"); ax.axis("off")
+        plt.tight_layout(); pdf.savefig(fig, dpi=300); plt.close(fig)
+
+    print(f"✅ Saved A4 landscape PDF to {args.pdf} (frame-mode={args.frame_mode})")
 
 if __name__ == "__main__":
     main()

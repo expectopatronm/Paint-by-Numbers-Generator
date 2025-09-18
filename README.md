@@ -102,7 +102,30 @@ The script generates logical **frames** that guide the painting process:
 5. **Completed**  
    - All clusters together, for the finished map.
 
-⚠️ If a group has no clusters, that frame is skipped.
+### Value-sliced (5 levels of value)
+1. Deep Shadows (lowest ~10%)  
+2. Core Shadows (to ~25%)  
+3. Midtones (to ~70%)  
+4. Half-Lights (to ~85%)  
+5. Highlights (top ~15%)  
+
+### Combined (9-step sequence, default)
+Interleaves the two systems into one logical painting order, avoiding duplicates:  
+
+1. Deep Shadows  
+2. Core Shadows  
+3. Shadows / Dark Blocks (remaining)  
+4. Value Midtones  
+5. Mid-tone Masses (remaining)  
+6. Neutrals / Background  
+7. Half-Lights  
+8. Highlights  
+9. Highlight Accents (remaining highs)  
+10. Completed (overview of all clusters)  
+
+⚠️ **Note:** If a step has no remaining clusters (because they were already painted in earlier steps), that step is **skipped automatically**. This is why some numbered steps may not appear in the PDF.  
+
+Future option: `--include-empty-steps` could force those pages to appear with a “No new clusters” note.  
 
 This follows classical oil painting logic:
 - Work **Dark → Light** (to keep lights clean).  
