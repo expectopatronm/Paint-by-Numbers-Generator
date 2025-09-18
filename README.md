@@ -1,4 +1,3 @@
-
 # Paint-by-Numbers Generator
 
 <p align="center">
@@ -17,6 +16,12 @@ This project converts any input image into a structured **paint-by-numbers guide
 
 - **Component swatches** to visualize which paints contribute to each cluster.
 - **Progress frames** that guide the painting process step-by-step (Darks → Midtones → Neutrals → Highlights → Completed).
+- An **Initial Sketch with Grid** (from the original image edges) to help transfer proportions onto canvas.
+
+<p align="center">
+  <img src="docs/Screenshot%202025-09-18%20094714.png" width="50%" />
+</p>
+ 
 - A clean **A4 landscape PDF** output where each page contains both the working image for that stage and the matching color key.
 
 <p align="center">
@@ -103,9 +108,12 @@ This sequencing reflects classical oil painting logic:
 - **Page 1 (Overview):**  
   - Left column: Original (top) and Paint-by-Numbers map (bottom).  
   - Right column: Full color key for all clusters.  
-- **Pages 2+:**  
+- **Page 2 (Initial Sketch with Grid):**  
+  - Edge-based sketch of the original image, with a light grid overlay (default every 80px).  
+  - Helps transfer proportions accurately onto canvas.  
+- **Pages 3+:**  
   - Left: One progress frame (darks, mids, neutrals, etc.).  
-  - Right: A frame-specific key showing **only the clusters used in that frame**, with their recipes and swatches.  
+  - Right: A frame-specific key showing **only the clusters used in that frame**, with their recipes, swatches, L\*, and value tweaks.  
 
 ### Legend Improvements
 - **Wrapped text** prevents long recipes from overlapping the figures.  
@@ -121,6 +129,8 @@ This makes the PDF usable both as an **overall map** and as a **step-by-step wor
 - **Number of clusters** (`--colors`) controls detail level.  
 - **Resize resolution** (`--resize`) balances speed vs. accuracy for clustering.  
 - **Max components per recipe** (`--components`) limits how many base paints appear in each mix.  
+- **Grid step** (`--grid-step`) controls spacing of the sketch overlay grid (default: 80px).  
+- **Edge percentile** (`--edge-percentile`) adjusts sensitivity of the sketch edges (default: 75).  
 - **CSV export** (`--csv`) generates a table of numeric ratios for all clusters.  
 - **Manual grouping** is possible by editing `progress_order` in the script if you want absolute control.
 
@@ -134,6 +144,7 @@ This makes the PDF usable both as an **overall map** and as a **step-by-step wor
 - **Progress frames** mimic a painter’s natural workflow, turning a flat “coloring book” into a logical painting roadmap.  
 - **Value tweaks and L\*** values keep near-identical mixes visually distinct.  
 - **Wrapped PDF legends** make the guide easy to read at the easel.  
+- **Initial Sketch with Grid** helps you transfer proportions and placement like a traditional painter.
 
 ---
 
@@ -141,9 +152,10 @@ This makes the PDF usable both as an **overall map** and as a **step-by-step wor
 
 1. Run the script on your chosen image.  
 2. Print the generated PDF.  
-3. Start with **Page 2 (Frame 1 – Shadows)**, mix the paints shown, and block them in.  
-4. Continue page by page until the painting is complete.  
-5. Use **Page 1 (Overview)** as a reference throughout.
+3. Start with **Page 2 (Initial Sketch)** to lightly sketch your canvas.  
+4. Move to **Page 3 (Frame 1 – Shadows)**, mix the paints shown, and block them in.  
+5. Continue page by page until the painting is complete.  
+6. Use **Page 1 (Overview)** as a reference throughout.
 
 ---
 
