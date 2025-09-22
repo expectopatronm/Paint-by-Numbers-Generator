@@ -239,6 +239,22 @@ def original_edge_sketch_with_grid(img, grid_step=80, threshold_percentile=75.0)
         sketch[y:y+1, :] = grid_color
     return Image.fromarray(sketch.astype(np.uint8))
 
+def add_grid_to_rgb(arr, grid_step=80, grid_color=200):
+    """
+    Overlay a grid onto an RGB uint8 image array, non-destructively.
+    """
+    out = arr.copy()
+    if out.ndim != 3 or out.shape[2] != 3:
+        raise ValueError("add_grid_to_rgb expects an HxWx3 RGB array.")
+    h, w, _ = out.shape
+    # Vertical lines
+    for x in range(0, w, grid_step):
+        out[:, x:x+1, :] = grid_color
+    # Horizontal lines
+    for y in range(0, h, grid_step):
+        out[y:y+1, :, :] = grid_color
+    return out
+
 def draw_color_key(ax, target_palette, recipes, entries_per_color, base_palette, used_indices=None,
                    title="Color Key • Ratios + Component Paints", tweaks=None, wrap_width=55,
                    show_components=True, deltaEs=None):
@@ -416,6 +432,7 @@ def main():
         ax1.imshow(img)
         ax1.set_title("Original")
         ax1.axis("off")
+        # Keep overview PBN without grid (acts as a clean reference)
         ax2.imshow(pbn_image)
         ax2.set_title(f"Paint by Numbers ({args.colors} colors) • model={args.mix_model} • max parts={args.max_parts}")
         ax2.axis("off")
@@ -429,7 +446,7 @@ def main():
         pdf.savefig(fig, dpi=300)
         plt.close(fig)
 
-        # Page 2: Edge sketch
+        # Page 2: Edge sketch (already has grid)
         fig = plt.figure(figsize=A4_LANDSCAPE)
         ax = fig.add_subplot(111)
         ax.imshow(sketch_img, cmap='gray')
@@ -439,14 +456,15 @@ def main():
         pdf.savefig(fig, dpi=300)
         plt.close(fig)
 
-        # Emit frames in chosen mode
+        # Emit frames in chosen mode (now with grid applied)
         for title, idxs, frame in frames_to_emit:
+            frame_with_grid = add_grid_to_rgb(frame, grid_step=args.grid_step, grid_color=200)
             fig = plt.figure(figsize=A4_LANDSCAPE)
             gs = GridSpec(1, 2, width_ratios=[1, 1.6], figure=fig)
             axL = fig.add_subplot(gs[0,0])
             axR = fig.add_subplot(gs[0,1])
-            axL.imshow(frame)
-            axL.set_title(title)
+            axL.imshow(frame_with_grid)
+            axL.set_title(title + " + Grid")
             axL.axis("off")
             draw_color_key(axR, target_palette, all_recipes, all_entries, BASE_PALETTE,
                            used_indices=idxs,
@@ -458,11 +476,12 @@ def main():
             pdf.savefig(fig, dpi=300)
             plt.close(fig)
 
-        # Completed page
+        # Completed page (with grid applied)
+        completed_with_grid = add_grid_to_rgb(pbn_image, grid_step=args.grid_step, grid_color=200)
         fig = plt.figure(figsize=A4_LANDSCAPE)
         ax = fig.add_subplot(111)
-        ax.imshow(pbn_image)
-        ax.set_title("Completed — All Colors Applied")
+        ax.imshow(completed_with_grid)
+        ax.set_title("Completed — All Colors Applied + Grid")
         ax.axis("off")
         plt.tight_layout()
         pdf.savefig(fig, dpi=300)
