@@ -1,6 +1,7 @@
 import argparse
 import itertools
 import numpy as np
+import cv2
 from PIL import Image
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
@@ -220,24 +221,176 @@ def build_value_tweaks(palette, recipes_text):
                 tweaks[ci] = "Value tweak: none (base)"
     return tweaks
 
-def original_edge_sketch_with_grid(img, grid_step=80, threshold_percentile=75.0):
-    arr = np.array(img.convert("RGB"))
-    gray = np.dot(arr[..., :3], [0.2989, 0.5870, 0.1140]).astype(np.float32)
-    gx = ndi.sobel(gray, axis=1, mode='reflect')
-    gy = ndi.sobel(gray, axis=0, mode='reflect')
-    mag = np.hypot(gx, gy)
-    if mag.max() > 0:
-        mag = mag / mag.max()
-    t = np.percentile(mag, threshold_percentile)
-    edges = (mag >= t).astype(np.uint8) * 255
-    sketch = 255 - edges
-    h, w = sketch.shape
-    grid_color = 200
-    for x in range(0, w, grid_step):
-        sketch[:, x:x+1] = grid_color
-    for y in range(0, h, grid_step):
-        sketch[y:y+1, :] = grid_color
-    return Image.fromarray(sketch.astype(np.uint8))
+def ensure_gray(bgr):
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
+
+def im2float01(img_u8): return img_u8.astype(np.float32) / 255.0
+def float01_to_u8(imgf): return (np.clip(imgf, 0, 1) * 255.0 + 0.5).astype(np.uint8)
+def lerp(a, b, t): return a + (b - a) * float(np.clip(t, 0.0, 1.0))
+
+def clahe_gray(gray_u8, clip=2.0, tiles=8):
+    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tiles, tiles))
+    return clahe.apply(gray_u8)
+
+def canny_from_gradients(gray_u8, low_high_ratio=0.35, high_pct=90):
+    gx = cv2.Sobel(gray_u8, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray_u8, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.sqrt(gx*gx + gy*gy).ravel()
+    high = float(np.percentile(mag, high_pct))
+    high = np.clip(high, 10, 255)
+    low = max(5.0, high * low_high_ratio)
+    return int(low), int(high)
+
+def remove_small_components(bin_u8, min_area):
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(bin_u8, connectivity=8)
+    out = np.zeros_like(bin_u8)
+    for i in range(1, num):
+        if stats[i, cv2.CC_STAT_AREA] >= min_area:
+            out[labels == i] = 255
+    return out
+
+def size_norm(short_side, frac, odd=True, minv=3):
+    k = max(minv, int(round(short_side * frac)))
+    if odd: k |= 1
+    return k
+
+def illumination_flatten(gray_u8, smin, strength01):
+    if strength01 <= 0:
+        return gray_u8
+    sigma = smin * lerp(0.03, 0.08, strength01)
+    base = cv2.GaussianBlur(gray_u8, (0,0), sigma)
+    g = im2float01(gray_u8); b = im2float01(base)
+    flat = np.clip(g / (b + 1e-4), 0, 2.5)
+    flat = flat / flat.max() if flat.max() > 0 else flat
+    return float01_to_u8(flat)
+
+def bilateral_edge_aware(gray_u8, strength01):
+    if strength01 <= 0:
+        return gray_u8
+    sigma_color = lerp(10, 80, strength01)
+    sigma_space = lerp(3, 12, strength01)
+    return cv2.bilateralFilter(gray_u8, d=0, sigmaColor=sigma_color, sigmaSpace=sigma_space)
+
+def _auto_edge_mask(edge_strength_u8, target_fg=0.04, min_fg=0.01, max_fg=0.08, iters=8):
+    es = edge_strength_u8.astype(np.uint8)
+    H, W = es.shape[:2]; N = H * W
+    nz = es[es > 0]
+    if nz.size == 0:
+        return np.zeros_like(es, dtype=np.uint8)
+    lo, hi = 50.0, 98.0
+    best = None
+    for _ in range(iters):
+        p = 0.5 * (lo + hi)
+        T = np.percentile(nz, p)
+        _, binm = cv2.threshold(es, int(T), 255, cv2.THRESH_BINARY)
+        fg = np.count_nonzero(binm) / float(N)
+        best = binm
+        if fg < min_fg:
+            lo = 45.0; hi = p
+        elif fg > max_fg:
+            lo = p; hi = 99.0
+        else:
+            break
+    return best
+
+# ==============================
+# Pencil sketch core
+# ==============================
+def pencil_readable_norm(
+    bgr,
+    sketchiness01=0.99,
+    softness01=0.1,
+    highlight_clip01=0.99,
+    edge_boost01=0.99,
+    texture_suppression01=0.1,
+    illumination01=0.1,
+    despeckle01=0.25,
+    stroke01=0.1,
+    line_floor01=0.99,
+    use_clahe=True,
+    gamma_midtones=0.99
+):
+    gray = ensure_gray(bgr)
+    h, w = gray.shape[:2]; smin = min(h, w)
+
+    gray = illumination_flatten(gray, smin, illumination01)
+    if use_clahe:
+        gray = clahe_gray(gray, clip=lerp(1.3, 2.0, softness01), tiles=8)
+
+    blur_sharp = cv2.GaussianBlur(gray, (0,0), smin*0.003)
+    sharp = cv2.addWeighted(gray, 1.4, blur_sharp, -0.4, 0)
+
+    g_s = bilateral_edge_aware(sharp, texture_suppression01)
+    gf  = im2float01(g_s)
+    gf = np.power(np.clip(gf, 0, 1), gamma_midtones)
+
+    inv = 1.0 - gf
+    sigma = smin * lerp(0.006, 0.016, softness01)
+    blur = cv2.GaussianBlur(inv, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    denom = np.maximum(1e-4, 1.0 - blur)
+    dodge = np.clip(gf / denom, 0, 1)
+    dodge = np.minimum(dodge, lerp(0.90, 0.975, highlight_clip01))
+
+    low, high = canny_from_gradients(
+        g_s,
+        low_high_ratio=lerp(0.32, 0.50, 1.0 - sketchiness01),
+        high_pct=int(lerp(90, 97, sketchiness01))
+    )
+    can = cv2.Canny(g_s, low, high)
+
+    sigma1 = smin * lerp(0.003, 0.010, sketchiness01)
+    sigma2 = sigma1 * 1.6
+    g1 = cv2.GaussianBlur(gf, (0,0), sigma1)
+    g2 = cv2.GaussianBlur(gf, (0,0), sigma2)
+    dog = g1 - g2
+    tau = lerp(0.9, 1.18, sketchiness01)
+    phi = lerp(8.0, 22.0, sketchiness01 + edge_boost01*0.3)
+    xdog = 1.0 - (0.5 * (1 + np.tanh(phi * (dog - tau))))
+    xdog_u8 = float01_to_u8(xdog)
+
+    edge_mix = cv2.max(can, xdog_u8)
+    target_fg = lerp(0.025, 0.065, sketchiness01)
+    edge_bin = _auto_edge_mask(edge_mix, target_fg=target_fg,
+                               min_fg=0.015, max_fg=0.09)
+
+    if despeckle01 > 0:
+        min_area = int(lerp(0, 0.0020, despeckle01) * (h*w))
+        edge_bin = remove_small_components(edge_bin, min_area)
+    k = size_norm(smin, lerp(0.0015, 0.0040, stroke01), odd=False, minv=2)
+    edge_bin = cv2.dilate(edge_bin, np.ones((k, k), np.uint8), 1)
+
+    edge_mask = edge_bin.astype(np.float32) / 255.0
+    ink_floor = 1.0 - (line_floor01 * edge_mask)
+    tone_edge_mul = 1.0 - 0.40 * edge_mask
+    pencil = np.minimum(dodge * tone_edge_mul, ink_floor)
+
+    return float01_to_u8(pencil)
+
+
+def original_edge_sketch_with_grid(img, grid_step=80, grid_color=200, **pencil_kwargs):
+    """
+    Replacement: uses pencil_readable_norm instead of Sobel/percentile edges.
+    - img: PIL.Image
+    - grid_step: spacing in pixels between grid lines
+    - grid_color: 0..255 gray value for grid lines
+    - **pencil_kwargs: forwarded to pencil_readable_norm (e.g., sketchiness01, stroke01, etc.)
+    """
+    # PIL -> OpenCV BGR
+    rgb = np.array(img.convert("RGB"))
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+    # New sketch
+    sketch_u8 = pencil_readable_norm(bgr, **pencil_kwargs)  # grayscale uint8
+
+    # Overlay grid
+    h, w = sketch_u8.shape
+    out = sketch_u8.copy()
+    if grid_step and grid_step > 0:
+        out[:, ::grid_step] = grid_color   # vertical lines
+        out[::grid_step, :] = grid_color   # horizontal lines
+
+    # Back to PIL
+    return Image.fromarray(out, mode="L")
 
 def add_grid_to_rgb(arr, grid_step=80, grid_color=200):
     """
@@ -322,7 +475,7 @@ def main():
     img = Image.open(args.input).convert("RGB")
     orig_w, orig_h = img.size
 
-    sketch_img = original_edge_sketch_with_grid(img, grid_step=args.grid_step, threshold_percentile=args.edge_percentile)
+    sketch_img = original_edge_sketch_with_grid(img, grid_step=args.grid_step)
 
     img_small = img.resize(tuple(args.resize), resample=Image.BILINEAR)
     data_small = np.array(img_small)
