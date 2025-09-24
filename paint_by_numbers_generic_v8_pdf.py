@@ -8,7 +8,6 @@ from matplotlib.patches import Rectangle
 from matplotlib.gridspec import GridSpec
 from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.cluster import KMeans
-from scipy import ndimage as ndi
 import textwrap as _tw
 
 BASE_PALETTE = {
@@ -383,7 +382,6 @@ def original_edge_sketch_with_grid(img, grid_step=80, grid_color=200, **pencil_k
     sketch_u8 = pencil_readable_norm(bgr, **pencil_kwargs)  # grayscale uint8
 
     # Overlay grid
-    h, w = sketch_u8.shape
     out = sketch_u8.copy()
     if grid_step and grid_step > 0:
         out[:, ::grid_step] = grid_color   # vertical lines
