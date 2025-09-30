@@ -416,6 +416,20 @@ def draw_color_key(ax, target_palette, recipes, entries_per_color, base_palette,
 
     base_order = list(base_palette.keys())
 
+    # --- NEW: compute max components for layout ---
+    comp_counts = []
+    for ci in used_indices:
+        entries = entries_per_color[ci]
+        comp_counts.append(len({n for (n, _) in entries}))
+    max_comps = max(comp_counts or [0])
+
+    base_x = 13.5                              # where the little component swatches start
+    swatch_w = 0.7
+    swatch_step = 0.8
+    right_needed = base_x + max(0, max_comps - 1) * swatch_step + swatch_w + 0.6
+    xlim_right = max(16.5, right_needed)       # ensure we don’t clip
+    # ---------------------------------------------
+
     for row_idx, ci in enumerate(used_indices):
         target_color = target_palette[ci]
         recipe = recipes[ci]
@@ -437,20 +451,32 @@ def draw_color_key(ax, target_palette, recipes, entries_per_color, base_palette,
         ax.text(1.3, row_idx+0.5, wrapped, va="center", fontsize=8, wrap=True)
 
         if show_components:
-            comp_names = [n for (n, _) in entries]
-            base_x = 13.5
-            col_pos = 0
-            for name in base_order:
-                if name in comp_names:
-                    comp_rgb = np.array(base_palette[name]) / 255.0
-                    ax.add_patch(Rectangle((base_x + col_pos*0.8, row_idx), 0.7, 1, color=comp_rgb, ec="k", lw=0.2))
-                    col_pos += 1
+            # Right-to-left gutter settings (fixed page width)
+            page_right = 16.5  # keep your fixed canvas width
+            gutter_right = page_right - 0.3  # small right margin
+            swatch_w = 0.7
+            swatch_step = 0.8  # horizontal spacing per swatch
 
-    ax.set_xlim(0, 16.5)
+            # Draw per-row component swatches starting from the right edge, moving left
+            comp_names = [n for (n, _) in entries]
+            # Preserve your base_order so colors appear in a consistent order
+            comps_in_order = [name for name in base_order if name in comp_names]
+            n = len(comps_in_order)
+
+            # The leftmost x for this row so that n swatches fit, ending at the right gutter
+            start_x = gutter_right - (n * swatch_step)
+
+            for j, name in enumerate(comps_in_order):
+                comp_rgb = np.array(base_palette[name]) / 255.0
+                x = start_x + j * swatch_step
+                ax.add_patch(Rectangle((x, row_idx), swatch_w, 1, color=comp_rgb, ec="k", lw=0.2))
+
+    ax.set_xlim(0, 16.5)   # unchanged: fixed A4 layout
     ax.set_ylim(0, len(used_indices))
     ax.invert_yaxis()
     ax.axis("off")
     ax.set_title(title + "  (single swatch = target color)")
+
 
 def main():
     parser = argparse.ArgumentParser(description="A4 PDF with classic, value5, or combined 9-step frames.")
