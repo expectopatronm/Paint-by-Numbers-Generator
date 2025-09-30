@@ -1,3 +1,22 @@
+#!/usr/bin/env python3
+"""
+Paint-by-Numbers PDF generator (mixed-palette everywhere).
+
+What this version guarantees
+----------------------------
+• The printed PBN imagery (Page 1 preview, all step/per-color frames, and the final completed page)
+  uses ONLY the colors from your MIXED palette (derived from the limited tube colors).
+• The Color Key’s left tile swatch shows the MIXED color (not the cluster target).
+• Value-tweak suggestions are computed from MIXED colors (L* deviations within identical-recipe groups).
+• Grouping into steps (classic/value5/combined) is based on MIXED colors.
+• Keys have right-justified component swatches; per-row text wraps up to that row’s swatch block.
+• Tight margins; frame pages devote ~75% width to the frame and ~25% to the key.
+
+CLI
+---
+python make_pbn.py input.jpg --colors 25 --frame-mode combined --per-color-frames
+"""
+
 import argparse
 import itertools
 import numpy as np
@@ -10,6 +29,9 @@ from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.cluster import KMeans
 import textwrap as _tw
 
+# ---------------------------
+# Base “tube” paint palette
+# ---------------------------
 BASE_PALETTE = {
     "Titanium White": (245, 245, 245),
     "Lemon Yellow": (250, 239, 80),
@@ -21,15 +43,21 @@ BASE_PALETTE = {
     "Lamp Black": (20, 20, 20),
 }
 
+# ---------------------------
+# Color science helpers
+# ---------------------------
 def srgb_to_linear_arr(rgb_arr):
+    """Convert sRGB 0..255 to linear-light 0..1 (vectorized)."""
     rgb_arr = np.clip(rgb_arr / 255.0, 0, 1)
     return np.where(rgb_arr <= 0.04045, rgb_arr / 12.92, ((rgb_arr + 0.055)/1.055) ** 2.4)
 
 def linear_to_srgb_arr(lin):
+    """Convert linear-light 0..1 to sRGB 0..1 (vectorized)."""
     lin = np.clip(lin, 0, 1)
     return np.where(lin <= 0.0031308, 12.92*lin, 1.055*np.power(lin, 1/2.4) - 0.055)
 
 def srgb_to_xyz(rgb):
+    """sRGB (0..255) to XYZ (D65)."""
     lin = srgb_to_linear_arr(rgb/255.0)
     M = np.array([[0.4124564, 0.3575761, 0.1804375],
                   [0.2126729, 0.7151522, 0.0721750],
@@ -37,6 +65,7 @@ def srgb_to_xyz(rgb):
     return M @ lin
 
 def xyz_to_srgb(xyz):
+    """XYZ (D65) to sRGB (0..255)."""
     M = np.array([[ 3.2404542, -1.5371385, -0.4985314],
                   [-0.9692660,  1.8760108,  0.0415560],
                   [ 0.0556434, -0.2040259,  1.0572252]])
@@ -45,6 +74,7 @@ def xyz_to_srgb(xyz):
     return srgb * 255.0
 
 def xyz_to_lab(xyz):
+    """XYZ (D65) to CIELAB (L*, a*, b*)."""
     Xn, Yn, Zn = 0.95047, 1.0, 1.08883
     x, y, z = xyz[0]/Xn, xyz[1]/Yn, xyz[2]/Zn
     def f(t):
@@ -56,8 +86,11 @@ def xyz_to_lab(xyz):
     return np.array([L, a, b])
 
 def lab_to_xyz(lab):
+    """CIELAB to XYZ (D65)."""
     L, a, b = lab
-    Yn = 1.0; Xn = 0.95047; Zn = 1.08883
+    Yn = 1.0
+    Xn = 0.95047
+    Zn = 1.08883
     fy = (L + 16)/116
     fx = fy + a/500
     fz = fy - b/200
@@ -69,36 +102,47 @@ def lab_to_xyz(lab):
     return np.array([x, y, z])
 
 def rgb_to_lab(rgb):
+    """sRGB (0..255) to CIELAB."""
     return xyz_to_lab(srgb_to_xyz(rgb))
 
 def lab_to_rgb(lab):
+    """CIELAB to sRGB (0..255)."""
     return xyz_to_srgb(lab_to_xyz(lab))
 
 def relative_luminance(rgb):
+    """Perceptual luminance Y from sRGB (0..255)."""
     lin = srgb_to_linear_arr(np.array(rgb, dtype=float))
     return 0.2126*lin[0] + 0.7152*lin[1] + 0.0722*lin[2]
 
 def Lstar_from_rgb(rgb):
+    """Convenience: compute CIELAB L* from sRGB."""
     return float(np.clip(rgb_to_lab(np.array(rgb, float))[0], 0, 100))
 
+# ---------------------------
+# Mixing models
+# ---------------------------
 def mix_linear(parts, base_rgbs):
+    """Linear-light additive mix of base colors."""
     w = parts / np.sum(parts)
     lin = np.sum(srgb_to_linear_arr(base_rgbs.T) * w, axis=1)
     return np.clip(255*linear_to_srgb_arr(lin), 0, 255)
 
 def mix_lab(parts, base_rgbs):
+    """Average colors in Lab space."""
     w = parts / np.sum(parts)
     labs = np.array([rgb_to_lab(c) for c in base_rgbs])
     lab = np.sum(labs.T * w, axis=1)
     return np.clip(lab_to_rgb(lab), 0, 255)
 
 def mix_subtractive(parts, base_rgbs):
+    """Simple subtractive mix (1 - Π(1 - c)^w)."""
     w = parts / np.sum(parts)
     c = (base_rgbs/255.0)
     res = 1.0 - np.prod((1.0 - c) ** w[:, None], axis=0)
     return np.clip(res*255.0, 0, 255)
 
 def mix_km_generic(parts, base_rgbs):
+    """Approximate Kubelka–Munk via Beer–Lambert in RGB (quick heuristic)."""
     w = parts / np.sum(parts)
     R = np.clip(base_rgbs/255.0, 1e-4, 1.0)
     A = -np.log(R)
@@ -107,6 +151,7 @@ def mix_km_generic(parts, base_rgbs):
     return np.clip(R_mix*255.0, 0, 255)
 
 def mix_color(parts, base_rgbs, model):
+    """Dispatch to the requested mixing model."""
     if model == "linear":
         return mix_linear(parts, base_rgbs)
     elif model == "lab":
@@ -118,7 +163,11 @@ def mix_color(parts, base_rgbs, model):
     else:
         return mix_linear(parts, base_rgbs)
 
+# ---------------------------
+# Search helpers
+# ---------------------------
 def enumerate_partitions(total, k):
+    """Yield k-tuples of nonnegative integers that sum to `total`."""
     if k == 1:
         yield (total,)
         return
@@ -127,9 +176,14 @@ def enumerate_partitions(total, k):
             yield (i,) + rest
 
 def deltaE_lab(rgb1, rgb2):
+    """ΔE*ab between two sRGB colors."""
     return float(np.linalg.norm(rgb_to_lab(rgb1) - rgb_to_lab(rgb2)))
 
 def integer_mix_best(target_rgb, base_names, max_parts=5, max_components=3, model="km"):
+    """
+    Brute-force an integer-part recipe that approximates target_rgb
+    using up to `max_components` base colors and exactly `max_parts` parts.
+    """
     base_rgbs_full = np.array([BASE_PALETTE[n] for n in base_names], dtype=float)
     target = np.array(target_rgb, dtype=float)
 
@@ -138,7 +192,7 @@ def integer_mix_best(target_rgb, base_names, max_parts=5, max_components=3, mode
     best_rgb = target
 
     N = len(base_names)
-    max_components = min(max_components, N, max_parts if max_parts>0 else 1)
+    max_components = min(max_components, N, max_parts if max_parts > 0 else 1)
 
     for m in range(1, max_components + 1):
         for combo in itertools.combinations(range(N), m):
@@ -160,11 +214,14 @@ def integer_mix_best(target_rgb, base_names, max_parts=5, max_components=3, mode
     return best_entries, best_rgb, best_err
 
 def recipe_text(entries):
+    """Human-readable e.g. '2 parts Yellow + 1 part Black'."""
     return " + ".join([f"{p} part{'s' if p != 1 else ''} {n}" for n, p in entries]) if entries else "—"
 
 def rgb_to_hsv(rgb):
+    """Return (h, s, v) with s,v ∈ [0..1]."""
     rgb = np.array(rgb, dtype=float) / 255.0
-    mx = rgb.max(); mn = rgb.min()
+    mx = rgb.max()
+    mn = rgb.min()
     diff = mx - mn
     if diff == 0:
         h = 0.0
@@ -178,7 +235,11 @@ def rgb_to_hsv(rgb):
     v = mx
     return h, s, v
 
+# ---------------------------
+# Grouping strategies (we'll call these with the MIXED palette)
+# ---------------------------
 def group_classic(palette):
+    """Classic buckets by luminance/saturation: darks, mids, neutrals, highs."""
     n = len(palette)
     lums = np.array([relative_luminance(c) for c in palette])
     sats = np.array([rgb_to_hsv(c)[1] for c in palette])
@@ -191,6 +252,7 @@ def group_classic(palette):
     return {"darks": darks, "mids": mids, "neutrals": neutrals, "highs": highs}
 
 def group_value5(palette):
+    """Five value bands by luminance percentiles."""
     L = np.array([relative_luminance(c) for c in palette])
     q10, q25, q70, q85 = np.quantile(L, [0.10, 0.25, 0.70, 0.85])
     deep = [i for i in range(len(palette)) if L[i] <= q10]
@@ -200,27 +262,41 @@ def group_value5(palette):
     highs = [i for i in range(len(palette)) if L[i] > q85]
     return {"deep": deep, "core": core, "mids": mids, "half": half, "highs": highs}
 
-def build_value_tweaks(palette, recipes_text):
+def build_value_tweaks(palette, recipes_text, *, threshold=0.25):
+    """
+    Suggest tiny +/- value tweaks for colors that share the same recipe.
+
+    Pass the *palette you actually want to compare*:
+      • approx_uint8  → tweaks vs the mixed colors (recommended)
+      • target_palette → tweaks vs cluster centroids (not recommended)
+
+    threshold: minimum |L* - group_mean| that triggers a tweak.
+    """
     groups = {}
     for i, r in enumerate(recipes_text):
         groups.setdefault(r, []).append(i)
+
     tweaks = {i: "" for i in range(len(palette))}
-    for r, indices in groups.items():
-        if len(indices) <= 1:
+    for _, idxs in groups.items():
+        if len(idxs) <= 1:
             continue
-        Ls = np.array([Lstar_from_rgb(palette[i]) for i in indices])
-        L_mean = Ls.mean()
-        for ci, L in zip(indices, Ls):
+        Ls = np.array([Lstar_from_rgb(palette[i]) for i in idxs], float)
+        L_mean = float(Ls.mean())
+        for ci, L in zip(idxs, Ls):
             delta = L - L_mean
-            if delta > 0.5:
+            if delta > threshold:
                 tweaks[ci] = "Value tweak: + tiny White"
-            elif delta < -0.5:
+            elif delta < -threshold:
                 tweaks[ci] = "Value tweak: + tiny Black"
             else:
                 tweaks[ci] = "Value tweak: none (base)"
     return tweaks
 
+# ---------------------------
+# Image utilities
+# ---------------------------
 def ensure_gray(bgr):
+    """Ensure single-channel uint8 grayscale."""
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
 
 def im2float01(img_u8): return img_u8.astype(np.float32) / 255.0
@@ -228,10 +304,12 @@ def float01_to_u8(imgf): return (np.clip(imgf, 0, 1) * 255.0 + 0.5).astype(np.ui
 def lerp(a, b, t): return a + (b - a) * float(np.clip(t, 0.0, 1.0))
 
 def clahe_gray(gray_u8, clip=2.0, tiles=8):
+    """CLAHE for local contrast normalization."""
     clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tiles, tiles))
     return clahe.apply(gray_u8)
 
 def canny_from_gradients(gray_u8, low_high_ratio=0.35, high_pct=90):
+    """Set Canny thresholds from gradient percentiles for robustness."""
     gx = cv2.Sobel(gray_u8, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(gray_u8, cv2.CV_32F, 0, 1, ksize=3)
     mag = np.sqrt(gx*gx + gy*gy).ravel()
@@ -241,6 +319,7 @@ def canny_from_gradients(gray_u8, low_high_ratio=0.35, high_pct=90):
     return int(low), int(high)
 
 def remove_small_components(bin_u8, min_area):
+    """Remove tiny blobs from a binary mask."""
     num, labels, stats, _ = cv2.connectedComponentsWithStats(bin_u8, connectivity=8)
     out = np.zeros_like(bin_u8)
     for i in range(1, num):
@@ -249,21 +328,25 @@ def remove_small_components(bin_u8, min_area):
     return out
 
 def size_norm(short_side, frac, odd=True, minv=3):
+    """Kernel/blur size proportional to the short image side."""
     k = max(minv, int(round(short_side * frac)))
     if odd: k |= 1
     return k
 
 def illumination_flatten(gray_u8, smin, strength01):
+    """Divide-by-blur illumination correction."""
     if strength01 <= 0:
         return gray_u8
     sigma = smin * lerp(0.03, 0.08, strength01)
     base = cv2.GaussianBlur(gray_u8, (0,0), sigma)
-    g = im2float01(gray_u8); b = im2float01(base)
+    g = im2float01(gray_u8)
+    b = im2float01(base)
     flat = np.clip(g / (b + 1e-4), 0, 2.5)
     flat = flat / flat.max() if flat.max() > 0 else flat
     return float01_to_u8(flat)
 
 def bilateral_edge_aware(gray_u8, strength01):
+    """Bilateral filter that preserves edges while taming textures."""
     if strength01 <= 0:
         return gray_u8
     sigma_color = lerp(10, 80, strength01)
@@ -271,8 +354,10 @@ def bilateral_edge_aware(gray_u8, strength01):
     return cv2.bilateralFilter(gray_u8, d=0, sigmaColor=sigma_color, sigmaSpace=sigma_space)
 
 def _auto_edge_mask(edge_strength_u8, target_fg=0.04, min_fg=0.01, max_fg=0.08, iters=8):
+    """Find a binary edge mask that lands in a desired foreground fraction."""
     es = edge_strength_u8.astype(np.uint8)
-    H, W = es.shape[:2]; N = H * W
+    H, W = es.shape[:2]
+    N = H * W
     nz = es[es > 0]
     if nz.size == 0:
         return np.zeros_like(es, dtype=np.uint8)
@@ -285,16 +370,18 @@ def _auto_edge_mask(edge_strength_u8, target_fg=0.04, min_fg=0.01, max_fg=0.08, 
         fg = np.count_nonzero(binm) / float(N)
         best = binm
         if fg < min_fg:
-            lo = 45.0; hi = p
+            lo = 45.0
+            hi = p
         elif fg > max_fg:
-            lo = p; hi = 99.0
+            lo = p
+            hi = 99.0
         else:
             break
     return best
 
-# ==============================
-# Pencil sketch core
-# ==============================
+# ---------------------------
+# Pencil sketch pipeline
+# ---------------------------
 def pencil_readable_norm(
     bgr,
     sketchiness01=0.99,
@@ -309,8 +396,10 @@ def pencil_readable_norm(
     use_clahe=True,
     gamma_midtones=0.99
 ):
+    """Produce a clean pencil-like grayscale, suitable for grid overlay and printing."""
     gray = ensure_gray(bgr)
-    h, w = gray.shape[:2]; smin = min(h, w)
+    h, w = gray.shape[:2]
+    smin = min(h, w)
 
     gray = illumination_flatten(gray, smin, illumination01)
     if use_clahe:
@@ -365,119 +454,153 @@ def pencil_readable_norm(
 
     return float01_to_u8(pencil)
 
-
 def original_edge_sketch_with_grid(img, grid_step=80, grid_color=200, **pencil_kwargs):
-    """
-    Replacement: uses pencil_readable_norm instead of Sobel/percentile edges.
-    - img: PIL.Image
-    - grid_step: spacing in pixels between grid lines
-    - grid_color: 0..255 gray value for grid lines
-    - **pencil_kwargs: forwarded to pencil_readable_norm (e.g., sketchiness01, stroke01, etc.)
-    """
-    # PIL -> OpenCV BGR
+    """Pencil sketch + grid overlay from a PIL image."""
     rgb = np.array(img.convert("RGB"))
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-
-    # New sketch
     sketch_u8 = pencil_readable_norm(bgr, **pencil_kwargs)  # grayscale uint8
 
-    # Overlay grid
     out = sketch_u8.copy()
     if grid_step and grid_step > 0:
         out[:, ::grid_step] = grid_color   # vertical lines
         out[::grid_step, :] = grid_color   # horizontal lines
-
-    # Back to PIL
     return Image.fromarray(out, mode="L")
 
 def add_grid_to_rgb(arr, grid_step=80, grid_color=200):
-    """
-    Overlay a grid onto an RGB uint8 image array, non-destructively.
-    """
+    """Overlay a grid onto an RGB uint8 image array, non-destructively."""
     out = arr.copy()
     if out.ndim != 3 or out.shape[2] != 3:
         raise ValueError("add_grid_to_rgb expects an HxWx3 RGB array.")
-    h, w, _ = out.shape
-    # Vertical lines
-    for x in range(0, w, grid_step):
+    for x in range(0, arr.shape[1], grid_step):  # vertical
         out[:, x:x+1, :] = grid_color
-    # Horizontal lines
-    for y in range(0, h, grid_step):
+    for y in range(0, arr.shape[0], grid_step):  # horizontal
         out[y:y+1, :, :] = grid_color
     return out
 
-def draw_color_key(ax, target_palette, recipes, entries_per_color, base_palette, used_indices=None,
-                   title="Color Key • Ratios + Component Paints", tweaks=None, wrap_width=55,
-                   show_components=True, deltaEs=None):
+
+# ---------------------------
+# Color key drawer (right band, right-justified swatches, per-row wrapping)
+# ---------------------------
+def draw_color_key(
+    ax,
+    target_palette,            # still used for ΔE reporting (target→mix quality)
+    recipes,
+    entries_per_color,
+    base_palette,
+    used_indices=None,
+    title="Color Key • Ratios + Component Paints",
+    tweaks=None,
+    wrap_width=55,
+    show_components=True,
+    deltaEs=None,
+    # Layout overrides (optional)
+    left_pad=None,        # where the text column starts; must be > 1.0 to avoid the index tile
+    right_margin=None,    # tiny right gutter
+    swatch_step=None,     # horizontal spacing per swatch
+    swatch_w=None,        # swatch rectangle width
+    no_band_bg=True,      # don't paint a white band; text wraps per row anyway
+    text_gap=0.05,        # small gap between text and its row's swatch block
+    # NEW: the palette to display for the big swatch — pass the mixed palette
+    approx_palette=None,
+):
+    """
+    Render a color key with:
+      • Left: mixed color swatch (column width = 1.0 axis unit) + wrapped text.
+      • Right: component swatches docked to the right page edge (right-justified per row).
+      • Text wraps to each row’s swatch start.
+
+    NOTE: Provide `approx_palette` (the mixed colors) to show the paint you actually use.
+    """
     if used_indices is None:
         used_indices = list(range(len(target_palette)))
     if tweaks is None:
         tweaks = {i: "" for i in range(len(target_palette))}
-
     base_order = list(base_palette.keys())
 
-    # --- NEW: compute max components for layout ---
-    comp_counts = []
-    for ci in used_indices:
-        entries = entries_per_color[ci]
-        comp_counts.append(len({n for (n, _) in entries}))
-    max_comps = max(comp_counts or [0])
+    # Axes units (consistent virtual canvas used for layout math)
+    XMAX = 16.5
+    LEFT_PAD = 1.25 if left_pad is None else max(1.05, float(left_pad))  # keep clear of the 1.0-wide index tile
+    RIGHT_MARGIN = 0.20 if right_margin is None else float(right_margin)
+    swatch_w = 0.70 if swatch_w is None else float(swatch_w)
+    swatch_step = 0.80 if swatch_step is None else float(swatch_step)
 
-    base_x = 13.5                              # where the little component swatches start
-    swatch_w = 0.7
-    swatch_step = 0.8
-    right_needed = base_x + max(0, max_comps - 1) * swatch_step + swatch_w + 0.6
-    xlim_right = max(16.5, right_needed)       # ensure we don’t clip
-    # ---------------------------------------------
+    # Compute conservative band-left (based on max columns), used only if white band is enabled.
+    def comp_names(entries): return [n for (n, _) in entries]
+    max_n_comp = 0
+    for ci in used_indices:
+        max_n_comp = max(max_n_comp, len(comp_names(entries_per_color[ci])))
+
+    gutter_right = XMAX - RIGHT_MARGIN
+    band_left = gutter_right - (max_n_comp * swatch_step)
+
+    if not no_band_bg:
+        ax.add_patch(Rectangle((band_left - 0.0001, 0),
+                               gutter_right - (band_left - 0.0001),
+                               len(used_indices),
+                               facecolor="white", edgecolor="none", zorder=0.5))
 
     for row_idx, ci in enumerate(used_indices):
-        target_color = target_palette[ci]
-        recipe = recipes[ci]
-        entries = entries_per_color[ci]
+        # Which swatch color to show on the left tile: MIXED if provided, else target
+        show_rgb = (approx_palette[ci] if approx_palette is not None else target_palette[ci])
 
-        ax.add_patch(Rectangle((0, row_idx), 1, 1, color=(target_color/255), ec="k", lw=0.2))
-        ax.text(0.5, row_idx+0.5, f"{ci+1}", ha="center", va="center", fontsize=8, color="black",
+        # Leftmost row mixed-color tile + index badge (tile spans x∈[0,1])
+        ax.add_patch(Rectangle((0, row_idx), 1, 1, color=(show_rgb/255), ec="k", lw=0.2))
+        ax.text(0.5, row_idx + 0.5, f"{ci+1}",
+                ha="center", va="center", fontsize=8, color="black",
                 bbox=dict(facecolor=(1,1,1,0.45), edgecolor='none', boxstyle='round,pad=0.1'))
 
-        Lstar = Lstar_from_rgb(target_color)
+        # Build row text
+        Lstar = Lstar_from_rgb(show_rgb)
         tweak_str = f"  • L*={Lstar:.1f}"
         if deltaEs is not None:
-            tweak_str += f"  • ΔE≈{deltaEs[ci]:.1f}"
+            tweak_str += f"  • ΔE≈{deltaEs[ci]:.2f}"  # more precision
         if tweaks.get(ci, ""):
             tweak_str += f"  • {tweaks[ci]}"
+        text_str = f"{ci+1}: {recipes[ci]}{tweak_str}"
 
-        text_str = f"{ci+1}: {recipe}{tweak_str}"
-        wrapped = _tw.fill(text_str, width=wrap_width)
-        ax.text(1.3, row_idx+0.5, wrapped, va="center", fontsize=8, wrap=True)
+        # Per-row swatch start (right-justified block)
+        row_comp_names = [n for n in base_order if n in comp_names(entries_per_color[ci])]
+        n_comp = len(row_comp_names)
+        row_start_x = gutter_right - (n_comp * swatch_step)  # left edge of this row's block
 
-        if show_components:
-            # Right-to-left gutter settings (fixed page width)
-            page_right = 16.5  # keep your fixed canvas width
-            gutter_right = page_right - 0.3  # small right margin
-            swatch_w = 0.7
-            swatch_step = 0.8  # horizontal spacing per swatch
+        # Wrap so text flows right up to this row's block, leaving a tiny gap
+        avail_units = max(1.0, (row_start_x - text_gap) - LEFT_PAD)
+        full_text_band = XMAX - RIGHT_MARGIN - LEFT_PAD
+        frac = np.clip(avail_units / max(1.0, full_text_band), 0.2, 1.2)
+        local_wrap = max(20, int(round(wrap_width * float(frac))))
+        ax.text(LEFT_PAD, row_idx + 0.5, _tw.fill(text_str, width=local_wrap),
+                va="center", fontsize=8, wrap=True, zorder=1.0)
 
-            # Draw per-row component swatches starting from the right edge, moving left
-            comp_names = [n for (n, _) in entries]
-            # Preserve your base_order so colors appear in a consistent order
-            comps_in_order = [name for name in base_order if name in comp_names]
-            n = len(comps_in_order)
-
-            # The leftmost x for this row so that n swatches fit, ending at the right gutter
-            start_x = gutter_right - (n * swatch_step)
-
-            for j, name in enumerate(comps_in_order):
+        # Draw this row’s swatches (grow from the right edge inward)
+        if show_components and n_comp > 0:
+            for j, name in enumerate(row_comp_names):
                 comp_rgb = np.array(base_palette[name]) / 255.0
-                x = start_x + j * swatch_step
-                ax.add_patch(Rectangle((x, row_idx), swatch_w, 1, color=comp_rgb, ec="k", lw=0.2))
+                x = row_start_x + j * swatch_step
+                ax.add_patch(Rectangle((x, row_idx), swatch_w, 1,
+                                       color=comp_rgb, ec="k", lw=0.2, zorder=1.5))
 
-    ax.set_xlim(0, 16.5)   # unchanged: fixed A4 layout
+    ax.set_xlim(0, XMAX)
     ax.set_ylim(0, len(used_indices))
     ax.invert_yaxis()
     ax.axis("off")
-    ax.set_title(title + "  (single swatch = target color)")
+    t = ax.set_title(title + "  (swatch = mixed color)", pad=3)
+    t.set_wrap(True)
 
+# ---------------------------
+# Figure helper (tight page margins)
+# ---------------------------
+def new_fig(size):
+    """
+    Create a figure and aggressively reduce borders.
+    We avoid tight_layout and instead set small paddings explicitly.
+    """
+    fig = plt.figure(figsize=size)
+    fig.subplots_adjust(left=0.02, right=0.985, bottom=0.04, top=0.965, wspace=0.02, hspace=0.02)
+    return fig
 
+# ---------------------------
+# Main CLI
+# ---------------------------
 def main():
     parser = argparse.ArgumentParser(description="A4 PDF with classic, value5, or combined 9-step frames.")
     parser.add_argument("input", help="Input image file path")
@@ -496,14 +619,14 @@ def main():
     parser.add_argument("--hide-components", action="store_true")
     parser.add_argument("--per-color-frames", action="store_true",
                         help="If set, add a separate frame for each color (inserted before the completed page).")
-
     args = parser.parse_args()
 
+    # Load + preprocess
     img = Image.open(args.input).convert("RGB")
     orig_w, orig_h = img.size
-
     sketch_img = original_edge_sketch_with_grid(img, grid_step=args.grid_step)
 
+    # KMeans on a smaller proxy for speed
     img_small = img.resize(tuple(args.resize), resample=Image.BILINEAR)
     data_small = np.array(img_small)
     Hs, Ws, _ = data_small.shape
@@ -512,8 +635,9 @@ def main():
     kmeans = KMeans(n_clusters=args.colors, random_state=42, n_init=5).fit(pixels_small)
     labels_small = kmeans.labels_.reshape(Hs, Ws).astype(np.uint8)
     centroids = kmeans.cluster_centers_.astype(float)
-    target_palette = centroids.astype(np.uint8)
+    target_palette = centroids.astype(np.uint8)  # informational only (targets)
 
+    # Build recipes against base palette (MIXED colors are what we use everywhere)
     names = args.palette
     all_entries, all_recipes, approx_rgbs, deltaEs = [], [], [], []
     for col in centroids:
@@ -526,16 +650,19 @@ def main():
         approx_rgbs.append(np.array(approx_rgb, dtype=float))
         deltaEs.append(err)
 
+    # MIXED palette (uint8) — this is the palette we use for EVERYTHING that gets printed
     approx_uint8 = np.clip(np.rint(np.array(approx_rgbs)), 0, 255).astype(np.uint8)
 
-    seg_mixed_small = approx_uint8[labels_small]
+    # Build the PBN image from the MIXED palette
+    seg_mixed_small = approx_uint8[labels_small]                            # mixed colors at small res
     labels_orig = Image.fromarray(labels_small, mode="L").resize((orig_w, orig_h), resample=Image.NEAREST)
     labels_orig = np.array(labels_orig, dtype=np.uint8)
     pbn_image = Image.fromarray(seg_mixed_small).resize((orig_w, orig_h), resample=Image.NEAREST)
-    pbn_image = np.array(pbn_image, dtype=np.uint8)
+    pbn_image = np.array(pbn_image, dtype=np.uint8)                         # MIXED color image
 
-    classic = group_classic(target_palette)
-    value5 = group_value5(target_palette)
+    # Grouping (based on MIXED palette)
+    classic = group_classic(approx_uint8)
+    value5  = group_value5(approx_uint8)
 
     # Orders
     classic_order = [
@@ -545,7 +672,6 @@ def main():
         ("Frame 4 – Highlights",            classic["highs"]),
         ("Frame 5 – Completed",             list(range(args.colors))),
     ]
-
     value5_order = [
         ("Value A – Deep Shadows (lowest ~10%)", value5["deep"]),
         ("Value B – Core Shadows (to ~25%)",     value5["core"]),
@@ -555,6 +681,7 @@ def main():
     ]
 
     def frames_from_order(order):
+        """Materialize (title, indices, frame_image) from an order list."""
         frames = []
         for title, idxs in order:
             if len(idxs) == 0:
@@ -564,24 +691,21 @@ def main():
             frames.append((title, idxs, frame_img))
         return frames
 
+    # Build frame sequence(s)
     if args.frame_mode == "combined":
-        # Build interleaved 9-step, subtracting already-painted indices to prevent duplicates
         painted = set()
-        def remaining(idx_list):
-            return [i for i in idx_list if i not in painted]
-
+        def remaining(idx_list): return [i for i in idx_list if i not in painted]
         sequence = [
             ("Step 1 – Deep Shadows",          value5["deep"]),
             ("Step 2 – Core Shadows",          value5["core"]),
-            ("Step 3 – Shadows / Dark Blocks", classic["darks"]),     # remaining darks
+            ("Step 3 – Shadows / Dark Blocks", classic["darks"]),
             ("Step 4 – Value Midtones",        value5["mids"]),
-            ("Step 5 – Mid-tone Masses",       classic["mids"]),      # remaining mids
+            ("Step 5 – Mid-tone Masses",       classic["mids"]),
             ("Step 6 – Neutrals / Background", classic["neutrals"]),
             ("Step 7 – Half-Lights",           value5["half"]),
             ("Step 8 – Highlights",            value5["highs"]),
             ("Step 9 – Highlight Accents",     classic["highs"]),
         ]
-
         frames_combined = []
         for title, idxs in sequence:
             rem = remaining(idxs)
@@ -596,110 +720,122 @@ def main():
         frames_to_emit = frames_from_order(classic_order)
     elif args.frame_mode == "value5":
         frames_to_emit = frames_from_order(value5_order)
-    else:  # both
+    else:  # "both"
         frames_to_emit = frames_from_order(classic_order) + frames_from_order(value5_order)
 
-    tweaks = build_value_tweaks(target_palette, all_recipes)
+    # Value tweaks from the MIXED palette
+    tweaks = build_value_tweaks(approx_uint8, all_recipes, threshold=0.25)
 
+    # ---------------------------
+    # PDF assembly (tight margins)
+    # ---------------------------
     A4_LANDSCAPE = (11.69, 8.27)
-    with PdfPages(args.pdf) as pdf:
-        # Page 1: Overview
-        fig = plt.figure(figsize=A4_LANDSCAPE)
-        gs = GridSpec(2, 2, width_ratios=[1,1.6], figure=fig)
-        ax1 = fig.add_subplot(gs[0,0])
-        ax2 = fig.add_subplot(gs[1,0])
-        ax3 = fig.add_subplot(gs[:,1])
+
+    with (PdfPages(args.pdf) as pdf):
+        # Page 1: Overview (MIXED preview + Key)
+        fig = new_fig(A4_LANDSCAPE)
+        gs = GridSpec(2, 2, width_ratios=[1.0, 1.55], figure=fig, wspace=0.01, hspace=0.03)
+        ax1 = fig.add_subplot(gs[0, 0])
+        ax2 = fig.add_subplot(gs[1, 0])
+        ax3 = fig.add_subplot(gs[:, 1])
         ax1.imshow(img)
-        ax1.set_title("Original")
+        t = ax1.set_title("Original", pad=2)
+        t.set_wrap(True)   # <-- wraps to the width of this (narrow) axes
         ax1.axis("off")
-        # Keep overview PBN without grid (acts as a clean reference)
+
+        # MIXED PBN preview (no grid here for cleanliness)
         ax2.imshow(pbn_image)
-        ax2.set_title(f"Paint by Numbers ({args.colors} colors) • model={args.mix_model} • max parts={args.max_parts}")
+        t = ax2.set_title(
+            f"Paint by Numbers ({args.colors} colors) • model={args.mix_model} • max parts={args.max_parts}",
+            pad=2
+        )
+        t.set_wrap(True)  # <-- wraps to the width of this (narrow) axes
         ax2.axis("off")
-        draw_color_key(ax3, target_palette, all_recipes, all_entries, BASE_PALETTE,
-                       used_indices=list(range(args.colors)),
-                       title=f"Color Key • All Clusters",
-                       tweaks=tweaks, wrap_width=args.wrap,
-                       show_components=not args.hide_components,
-                       deltaEs=deltaEs)
-        plt.tight_layout()
+
+        # Key (swatch = MIXED color)
+        draw_color_key(
+            ax3, target_palette, all_recipes, all_entries, BASE_PALETTE,
+            used_indices=list(range(args.colors)),
+            title="Color Key • All Clusters",
+            tweaks=tweaks,
+            wrap_width=int(args.wrap * 1.5),
+            show_components=not args.hide_components,
+            deltaEs=deltaEs,
+            swatch_step=0.55, swatch_w=0.55, right_margin=0.10, left_pad=1.10,
+            no_band_bg=True, text_gap=0.03,
+            approx_palette=approx_uint8,     # <<< show the mixed color
+        )
         pdf.savefig(fig, dpi=300)
         plt.close(fig)
 
-        # Page 2: Edge sketch (already has grid)
-        fig = plt.figure(figsize=A4_LANDSCAPE)
+        # Page 2: Edge sketch
+        fig = new_fig(A4_LANDSCAPE)
         ax = fig.add_subplot(111)
         ax.imshow(sketch_img, cmap='gray')
-        ax.set_title(f"Original Edge Sketch + Grid (step={args.grid_step}px, percentile={args.edge_percentile:.0f})")
+        t = ax.set_title(f"Original Edge Sketch + Grid (step={args.grid_step}px)", pad=2)
+        t.set_wrap(True)  # <-- wraps to the width of this (narrow) axes
         ax.axis("off")
-        plt.tight_layout()
         pdf.savefig(fig, dpi=300)
         plt.close(fig)
 
-        # Emit frames in chosen mode (now with grid applied)
+        # Frame pages (¾ image / ¼ key) — all based on MIXED colors
         for title, idxs, frame in frames_to_emit:
             frame_with_grid = add_grid_to_rgb(frame, grid_step=args.grid_step, grid_color=200)
-            fig = plt.figure(figsize=A4_LANDSCAPE)
-            gs = GridSpec(1, 2, width_ratios=[1, 1.6], figure=fig)
-            axL = fig.add_subplot(gs[0,0])
-            axR = fig.add_subplot(gs[0,1])
+            fig = new_fig(A4_LANDSCAPE)
+            gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
+            axL = fig.add_subplot(gs[0, 0])
+            axR = fig.add_subplot(gs[0, 1])
             axL.imshow(frame_with_grid)
-            axL.set_title(title + " + Grid")
+            t = axL.set_title(title + " + Grid", pad=2)
             axL.axis("off")
+            t.set_wrap(True)  # <-- wraps to the width of this (narrow) axes
             draw_color_key(axR, target_palette, all_recipes, all_entries, BASE_PALETTE,
                            used_indices=idxs,
                            title=f"Color Key • {title}",
-                           tweaks=tweaks, wrap_width=args.wrap,
+                           tweaks=tweaks,
+                           wrap_width=max(30, int(args.wrap * 0.7)),
                            show_components=not args.hide_components,
-                           deltaEs=deltaEs)
-            plt.tight_layout()
+                           deltaEs=deltaEs,
+                           left_pad=1.25, right_margin=0.18, text_gap=0.05,
+                           approx_palette=approx_uint8)     # <<< mixed swatch
             pdf.savefig(fig, dpi=300)
             plt.close(fig)
 
-        # Optional: per-color frames (inserted just before the completed page)
+        # Optional: per-color pages (¾ / ¼)
         if args.per_color_frames:
             for i in range(args.colors):
-                # Build a mask that reveals only this color's regions
                 mask = (labels_orig == i)
                 frame_img = np.where(mask[..., None], pbn_image, 255).astype(np.uint8)
                 frame_with_grid = add_grid_to_rgb(frame_img, grid_step=args.grid_step, grid_color=200)
 
-                # Page layout: left = per-color frame; right = color key for this color
-                fig = plt.figure(figsize=A4_LANDSCAPE)
-                gs = GridSpec(1, 2, width_ratios=[1, 1.6], figure=fig)
+                fig = new_fig(A4_LANDSCAPE)
+                gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
                 axL = fig.add_subplot(gs[0, 0])
                 axR = fig.add_subplot(gs[0, 1])
 
                 axL.imshow(frame_with_grid)
-                axL.set_title(f"Per-Color • #{i+1}")
+                t = axL.set_title(f"Per-Color • #{i+1}", pad=2)
+                t.set_wrap(True)   # <-- wraps to the width of this (narrow) axes
                 axL.axis("off")
-
-                draw_color_key(
-                    axR,
-                    target_palette,
-                    all_recipes,
-                    all_entries,
-                    BASE_PALETTE,
-                    used_indices=[i],
-                    title=f"Color Key • Color #{i+1}",
-                    tweaks=tweaks,
-                    wrap_width=args.wrap,
-                    show_components=not args.hide_components,
-                    deltaEs=deltaEs
-                )
-
-                plt.tight_layout()
+                draw_color_key(axR, target_palette, all_recipes, all_entries, BASE_PALETTE,
+                               used_indices=[i],
+                               title=f"Color Key • Color #{i+1}",
+                               tweaks=tweaks,
+                               wrap_width=max(30, int(args.wrap * 0.7)),
+                               show_components=not args.hide_components,
+                               deltaEs=deltaEs,
+                               left_pad=1.25, right_margin=0.18, text_gap=0.05)
                 pdf.savefig(fig, dpi=300)
                 plt.close(fig)
 
-        # Completed page (with grid applied)
+        # Final page: completed with grid
         completed_with_grid = add_grid_to_rgb(pbn_image, grid_step=args.grid_step, grid_color=200)
-        fig = plt.figure(figsize=A4_LANDSCAPE)
+        fig = new_fig(A4_LANDSCAPE)
         ax = fig.add_subplot(111)
         ax.imshow(completed_with_grid)
-        ax.set_title("Completed — All Colors Applied + Grid")
+        t = ax.set_title("Completed — All Colors Applied + Grid", pad=2)
+        t.set_wrap(True)  # <-- wraps to the width of this (narrow) axes
         ax.axis("off")
-        plt.tight_layout()
         pdf.savefig(fig, dpi=300)
         plt.close(fig)
 
