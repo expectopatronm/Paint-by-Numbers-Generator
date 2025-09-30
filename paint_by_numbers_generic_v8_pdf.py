@@ -468,6 +468,9 @@ def main():
     parser.add_argument("--grid-step", type=int, default=80)
     parser.add_argument("--edge-percentile", type=float, default=85.0)
     parser.add_argument("--hide-components", action="store_true")
+    parser.add_argument("--per-color-frames", action="store_true",
+                        help="If set, add a separate frame for each color (inserted before the completed page).")
+
     args = parser.parse_args()
 
     img = Image.open(args.input).convert("RGB")
@@ -626,6 +629,42 @@ def main():
             plt.tight_layout()
             pdf.savefig(fig, dpi=300)
             plt.close(fig)
+
+        # Optional: per-color frames (inserted just before the completed page)
+        if args.per_color_frames:
+            for i in range(args.colors):
+                # Build a mask that reveals only this color's regions
+                mask = (labels_orig == i)
+                frame_img = np.where(mask[..., None], pbn_image, 255).astype(np.uint8)
+                frame_with_grid = add_grid_to_rgb(frame_img, grid_step=args.grid_step, grid_color=200)
+
+                # Page layout: left = per-color frame; right = color key for this color
+                fig = plt.figure(figsize=A4_LANDSCAPE)
+                gs = GridSpec(1, 2, width_ratios=[1, 1.6], figure=fig)
+                axL = fig.add_subplot(gs[0, 0])
+                axR = fig.add_subplot(gs[0, 1])
+
+                axL.imshow(frame_with_grid)
+                axL.set_title(f"Per-Color • #{i+1}")
+                axL.axis("off")
+
+                draw_color_key(
+                    axR,
+                    target_palette,
+                    all_recipes,
+                    all_entries,
+                    BASE_PALETTE,
+                    used_indices=[i],
+                    title=f"Color Key • Color #{i+1}",
+                    tweaks=tweaks,
+                    wrap_width=args.wrap,
+                    show_components=not args.hide_components,
+                    deltaEs=deltaEs
+                )
+
+                plt.tight_layout()
+                pdf.savefig(fig, dpi=300)
+                plt.close(fig)
 
         # Completed page (with grid applied)
         completed_with_grid = add_grid_to_rgb(pbn_image, grid_step=args.grid_step, grid_color=200)
