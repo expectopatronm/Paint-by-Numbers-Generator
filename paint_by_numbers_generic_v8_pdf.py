@@ -265,12 +265,6 @@ def group_value5(palette):
 def build_value_tweaks(palette, recipes_text, *, threshold=0.25):
     """
     Suggest tiny +/- value tweaks for colors that share the same recipe.
-
-    Pass the *palette you actually want to compare*:
-      • approx_uint8  → tweaks vs the mixed colors (recommended)
-      • target_palette → tweaks vs cluster centroids (not recommended)
-
-    threshold: minimum |L* - group_mean| that triggers a tweak.
     """
     groups = {}
     for i, r in enumerate(recipes_text):
@@ -478,7 +472,7 @@ def add_grid_to_rgb(arr, grid_step=80, grid_color=200):
     return out
 
 # ---------------------------
-# Color key drawer (right band, right-justified swatches, per-row wrapping)
+# Color key drawer
 # ---------------------------
 def draw_color_key(
     ax,
@@ -492,7 +486,6 @@ def draw_color_key(
     wrap_width=55,
     show_components=True,
     deltaEs=None,
-    # Layout overrides (optional)
     left_pad=None,
     right_margin=None,
     swatch_step=None,
@@ -501,12 +494,6 @@ def draw_color_key(
     text_gap=0.05,
     approx_palette=None,
 ):
-    """
-    Render a color key with:
-      • Left: mixed color swatch (column width = 1.0 axis unit) + wrapped text.
-      • Right: component swatches docked to the right page edge (right-justified per row).
-      • Text wraps to each row’s swatch start.
-    """
     if used_indices is None:
         used_indices = list(range(len(target_palette)))
     if tweaks is None:
@@ -578,10 +565,6 @@ def draw_color_key(
 # Figure helper (tight page margins)
 # ---------------------------
 def new_fig(size):
-    """
-    Create a figure and aggressively reduce borders.
-    We avoid tight_layout and instead set small paddings explicitly.
-    """
     fig = plt.figure(figsize=size)
     fig.subplots_adjust(left=0.02, right=0.985, bottom=0.04, top=0.965, wspace=0.02, hspace=0.02)
     return fig
@@ -608,15 +591,25 @@ def main():
     parser.add_argument("--per-color-frames", action="store_true",
                         help="If set, add a separate frame for each color (inserted before the completed page).")
     parser.add_argument(
-        "--sketch-alpha", type=float, default=0.95,
-        help="Strength of the underlying sketch in UNPAINTED areas on step/per-color pages (0=no sketch, 1=full sketch)."
+        "--sketch-alpha", type=float, default=0.55,
+        help="Opacity/strength of the pencil sketch underlay (0=no effect, 1=full sketch) on step/per-color pages."
     )
+    parser.add_argument("--per-color-cumulative", action="store_true",
+                        help="Per-color frames build cumulatively: prior colors appear at --prev-alpha; current color is 100%")
+    parser.add_argument("--prev-alpha", type=float, default=0.75,
+                        help="Opacity for all previous colors on cumulative per-color frames (0..1)")
+
     args = parser.parse_args()
 
     # Load + preprocess
     img = Image.open(args.input).convert("RGB")
     orig_w, orig_h = img.size
-    sketch_img = original_edge_sketch_with_grid(img, grid_step=args.grid_step)
+
+    # Build BOTH: a plain pencil sketch (no grid) for underlay, and a sketch+grid for its own page
+    rgb = np.array(img)
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    sketch_gray = pencil_readable_norm(bgr)               # uint8 grayscale, NO GRID (for underlay)
+    sketch_img_with_grid = original_edge_sketch_with_grid(img, grid_step=args.grid_step)  # for display page
 
     # KMeans on a smaller proxy for speed
     img_small = img.resize(tuple(args.resize), resample=Image.BILINEAR)
@@ -642,7 +635,7 @@ def main():
         approx_rgbs.append(np.array(approx_rgb, dtype=float))
         deltaEs.append(err)
 
-    # MIXED palette (uint8) — this is the palette we use for EVERYTHING that gets printed
+    # MIXED palette (uint8)
     approx_uint8 = np.clip(np.rint(np.array(approx_rgbs)), 0, 255).astype(np.uint8)
 
     # Build the PBN image from the MIXED palette
@@ -760,35 +753,33 @@ def main():
         pdf.savefig(fig, dpi=300)
         plt.close(fig)
 
-        # Page 2: Edge sketch
+        # Page 2: Edge sketch (+grid) for reference only
         fig = new_fig(A4_LANDSCAPE)
         ax = fig.add_subplot(111)
-        ax.imshow(sketch_img, cmap='gray')
+        ax.imshow(sketch_img_with_grid, cmap='gray')
         t = ax.set_title(f"Original Edge Sketch + Grid (step={args.grid_step}px)", pad=2)
         t.set_wrap(True)
         ax.axis("off")
         pdf.savefig(fig, dpi=300)
         plt.close(fig)
 
-        # Shared sketch as RGB for compositing
-        sketch_rgb = np.array(sketch_img.convert("RGB"), dtype=np.uint8)
+        # --- Prepare multiply-underlay once ---
+        # Normalize sketch and turn into a multiplicative factor controlled by alpha:
+        # factor = 1 - a*(1 - sketch_norm) ∈ [1-a, 1]; whites do nothing, dark lines darken.
         a = float(np.clip(args.sketch_alpha, 0.0, 1.0))
+        sketch_norm = np.clip(sketch_gray.astype(np.float32) / 255.0, 0.0, 1.0)
+        sketch_factor = (1.0 - a) + a * sketch_norm  # shape HxW
+        sketch_factor_rgb = sketch_factor[..., None]  # broadcast to channels
 
-        # Frame pages (¾ image / ¼ key) — sketch only in UNPAINTED areas
+        # Frame pages (¾ image / ¼ key) — apply sketch under ALL areas (paint + unpainted)
         for title, idxs, frame in frames_to_emit:
-            # Painted mask for this step
-            painted_mask = np.isin(labels_orig, np.array(idxs, dtype=np.uint8))
-            # Start with the painted frame as-is (paint not altered)
-            composite = frame.copy()
+            frame_f = np.clip(frame.astype(np.float32) / 255.0, 0.0, 1.0)
+            # Multiply blend (no grid in the underlay)
+            composite = np.clip(frame_f * sketch_factor_rgb, 0.0, 1.0)
+            composite_u8 = (composite * 255.0 + 0.5).astype(np.uint8)
 
-            # Build faded-sketch background (white blended with sketch by alpha)
-            bg = ((1.0 - a) * 255.0 + a * sketch_rgb.astype(np.float32)).round().astype(np.uint8)
-
-            # Fill only the UNPAINTED pixels with the faded sketch
-            composite[~painted_mask] = bg[~painted_mask]
-
-            # Grid on top
-            frame_with_grid = add_grid_to_rgb(composite, grid_step=args.grid_step, grid_color=200)
+            # Grid on top (crisp)
+            frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
 
             # Layout
             fig = new_fig(A4_LANDSCAPE)
@@ -797,7 +788,7 @@ def main():
             axR = fig.add_subplot(gs[0, 1])
 
             axL.imshow(frame_with_grid)
-            t = axL.set_title(title + " + Grid (sketch in unpainted areas)", pad=2)
+            t = axL.set_title(title + " + Grid (sketch multiply underlay)", pad=2)
             t.set_wrap(True)
             axL.axis("off")
 
@@ -813,39 +804,73 @@ def main():
             pdf.savefig(fig, dpi=300)
             plt.close(fig)
 
-        # Optional: per-color pages (¾ / ¼) — sketch only in UNPAINTED areas
+        # Optional: per-color pages (¾ / ¼) — cumulative build option supported
         if args.per_color_frames:
+            # Make sure we have the multiply underlay factor ready (from earlier section)
+            a = float(np.clip(args.sketch_alpha, 0.0, 1.0))
+            # If you already computed sketch_gray and sketch_factor_rgb above, this is a no-op; otherwise compute here:
+            try:
+                sketch_factor_rgb
+            except NameError:
+                # Build a clean sketch (no grid) and turn into multiply factor
+                rgb = np.array(img)
+                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                sketch_gray = pencil_readable_norm(bgr)  # grayscale uint8, no grid
+                sketch_norm = np.clip(sketch_gray.astype(np.float32) / 255.0, 0.0, 1.0)
+                sketch_factor = (1.0 - a) + a * sketch_norm
+                sketch_factor_rgb = sketch_factor[..., None]
+
+            prev_alpha = float(np.clip(args.prev_alpha, 0.0, 1.0))
+
+            H, W = labels_orig.shape
+            prev_mask = np.zeros((H, W), dtype=bool)
+
             for i in range(args.colors):
-                # Mask of where this color is present
-                painted_mask = (labels_orig == i)
+                curr_mask = (labels_orig == i)
 
-                # Paint-only frame: chosen color where present, white elsewhere
-                frame_img = np.where(painted_mask[..., None], pbn_image, 255).astype(np.uint8)
+                # Start from white canvas
+                frame_rgb = np.full_like(pbn_image, 255, dtype=np.uint8)
 
-                # Start with paint untouched
-                composite = frame_img.copy()
+                # 1) Lay down all PREVIOUS colors at prev_alpha (if any)
+                if prev_alpha > 0 and prev_mask.any():
+                    # Linear blend toward the actual paint color, from white:
+                    # prev_mix = (1 - prev_alpha)*white + prev_alpha*paint
+                    sel_prev = prev_mask
+                    white_f = 255.0
+                    prev_blend = ((1.0 - prev_alpha) * white_f +
+                                  prev_alpha * pbn_image[sel_prev].astype(np.float32)).round().astype(np.uint8)
+                    frame_rgb[sel_prev] = prev_blend
 
-                # Faded sketch background for unpainted regions
-                bg = ((1.0 - a) * 255.0 + a * sketch_rgb.astype(np.float32)).round().astype(np.uint8)
-                composite[~painted_mask] = bg[~painted_mask]
+                # 2) Put CURRENT color opaquely (100%)
+                frame_rgb[curr_mask] = pbn_image[curr_mask]
 
-                # Grid on top
-                frame_with_grid = add_grid_to_rgb(composite, grid_step=args.grid_step, grid_color=200)
+                # 3) Sketch underlay EVERYWHERE via multiply (keeps grid crisp later)
+                frame_f = np.clip(frame_rgb.astype(np.float32) / 255.0, 0.0, 1.0)
+                composite = np.clip(frame_f * sketch_factor_rgb, 0.0, 1.0)
+                composite_u8 = (composite * 255.0 + 0.5).astype(np.uint8)
 
-                # Figure/page layout
+                # 4) Grid on top
+                frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
+
+                # 5) Page layout
                 fig = new_fig(A4_LANDSCAPE)
                 gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
                 axL = fig.add_subplot(gs[0, 0])
                 axR = fig.add_subplot(gs[0, 1])
 
                 axL.imshow(frame_with_grid)
-                t = axL.set_title(f"Per-Color • #{i+1} + Grid (sketch in unpainted areas)", pad=2)
+                t = axL.set_title(
+                    (f"Per-Color • #{i + 1} + Grid "
+                     f"{'(cumulative, prevα=' + str(prev_alpha) + ')' if args.per_color_cumulative else ''} "
+                     "(sketch multiply underlay)"),
+                    pad=2
+                )
                 t.set_wrap(True)
                 axL.axis("off")
 
                 draw_color_key(axR, target_palette, all_recipes, all_entries, BASE_PALETTE,
                                used_indices=[i],
-                               title=f"Color Key • Color #{i+1}",
+                               title=f"Color Key • Color #{i + 1}",
                                tweaks=tweaks,
                                wrap_width=max(30, int(args.wrap * 0.7)),
                                show_components=not args.hide_components,
@@ -855,7 +880,14 @@ def main():
                 pdf.savefig(fig, dpi=300)
                 plt.close(fig)
 
-        # Final page: completed with grid (no sketch underlay)
+                # 6) Update cumulative mask if the mode is on
+                if args.per_color_cumulative:
+                    prev_mask |= curr_mask
+                else:
+                    # If not cumulative, keep prev_mask empty so only curr color shows each page
+                    prev_mask[:] = False
+
+        # Final page: completed with grid (no sketch underlay here, to show true colors)
         completed_with_grid = add_grid_to_rgb(pbn_image, grid_step=args.grid_step, grid_color=200)
         fig = new_fig(A4_LANDSCAPE)
         ax = fig.add_subplot(111)
