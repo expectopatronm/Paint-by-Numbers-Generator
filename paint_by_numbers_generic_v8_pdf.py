@@ -477,13 +477,12 @@ def add_grid_to_rgb(arr, grid_step=80, grid_color=200):
         out[y:y+1, :, :] = grid_color
     return out
 
-
 # ---------------------------
 # Color key drawer (right band, right-justified swatches, per-row wrapping)
 # ---------------------------
 def draw_color_key(
     ax,
-    target_palette,            # still used for ΔE reporting (target→mix quality)
+    target_palette,
     recipes,
     entries_per_color,
     base_palette,
@@ -494,13 +493,12 @@ def draw_color_key(
     show_components=True,
     deltaEs=None,
     # Layout overrides (optional)
-    left_pad=None,        # where the text column starts; must be > 1.0 to avoid the index tile
-    right_margin=None,    # tiny right gutter
-    swatch_step=None,     # horizontal spacing per swatch
-    swatch_w=None,        # swatch rectangle width
-    no_band_bg=True,      # don't paint a white band; text wraps per row anyway
-    text_gap=0.05,        # small gap between text and its row's swatch block
-    # NEW: the palette to display for the big swatch — pass the mixed palette
+    left_pad=None,
+    right_margin=None,
+    swatch_step=None,
+    swatch_w=None,
+    no_band_bg=True,
+    text_gap=0.05,
     approx_palette=None,
 ):
     """
@@ -508,8 +506,6 @@ def draw_color_key(
       • Left: mixed color swatch (column width = 1.0 axis unit) + wrapped text.
       • Right: component swatches docked to the right page edge (right-justified per row).
       • Text wraps to each row’s swatch start.
-
-    NOTE: Provide `approx_palette` (the mixed colors) to show the paint you actually use.
     """
     if used_indices is None:
         used_indices = list(range(len(target_palette)))
@@ -517,14 +513,12 @@ def draw_color_key(
         tweaks = {i: "" for i in range(len(target_palette))}
     base_order = list(base_palette.keys())
 
-    # Axes units (consistent virtual canvas used for layout math)
     XMAX = 16.5
-    LEFT_PAD = 1.25 if left_pad is None else max(1.05, float(left_pad))  # keep clear of the 1.0-wide index tile
+    LEFT_PAD = 1.25 if left_pad is None else max(1.05, float(left_pad))
     RIGHT_MARGIN = 0.20 if right_margin is None else float(right_margin)
     swatch_w = 0.70 if swatch_w is None else float(swatch_w)
     swatch_step = 0.80 if swatch_step is None else float(swatch_step)
 
-    # Compute conservative band-left (based on max columns), used only if white band is enabled.
     def comp_names(entries): return [n for (n, _) in entries]
     max_n_comp = 0
     for ci in used_indices:
@@ -540,30 +534,25 @@ def draw_color_key(
                                facecolor="white", edgecolor="none", zorder=0.5))
 
     for row_idx, ci in enumerate(used_indices):
-        # Which swatch color to show on the left tile: MIXED if provided, else target
         show_rgb = (approx_palette[ci] if approx_palette is not None else target_palette[ci])
 
-        # Leftmost row mixed-color tile + index badge (tile spans x∈[0,1])
         ax.add_patch(Rectangle((0, row_idx), 1, 1, color=(show_rgb/255), ec="k", lw=0.2))
         ax.text(0.5, row_idx + 0.5, f"{ci+1}",
                 ha="center", va="center", fontsize=8, color="black",
                 bbox=dict(facecolor=(1,1,1,0.45), edgecolor='none', boxstyle='round,pad=0.1'))
 
-        # Build row text
         Lstar = Lstar_from_rgb(show_rgb)
         tweak_str = f"  • L*={Lstar:.1f}"
         if deltaEs is not None:
-            tweak_str += f"  • ΔE≈{deltaEs[ci]:.2f}"  # more precision
+            tweak_str += f"  • ΔE≈{deltaEs[ci]:.2f}"
         if tweaks.get(ci, ""):
             tweak_str += f"  • {tweaks[ci]}"
         text_str = f"{ci+1}: {recipes[ci]}{tweak_str}"
 
-        # Per-row swatch start (right-justified block)
         row_comp_names = [n for n in base_order if n in comp_names(entries_per_color[ci])]
         n_comp = len(row_comp_names)
-        row_start_x = gutter_right - (n_comp * swatch_step)  # left edge of this row's block
+        row_start_x = gutter_right - (n_comp * swatch_step)
 
-        # Wrap so text flows right up to this row's block, leaving a tiny gap
         avail_units = max(1.0, (row_start_x - text_gap) - LEFT_PAD)
         full_text_band = XMAX - RIGHT_MARGIN - LEFT_PAD
         frac = np.clip(avail_units / max(1.0, full_text_band), 0.2, 1.2)
@@ -571,7 +560,6 @@ def draw_color_key(
         ax.text(LEFT_PAD, row_idx + 0.5, _tw.fill(text_str, width=local_wrap),
                 va="center", fontsize=8, wrap=True, zorder=1.0)
 
-        # Draw this row’s swatches (grow from the right edge inward)
         if show_components and n_comp > 0:
             for j, name in enumerate(row_comp_names):
                 comp_rgb = np.array(base_palette[name]) / 255.0
@@ -619,6 +607,10 @@ def main():
     parser.add_argument("--hide-components", action="store_true")
     parser.add_argument("--per-color-frames", action="store_true",
                         help="If set, add a separate frame for each color (inserted before the completed page).")
+    parser.add_argument(
+        "--sketch-alpha", type=float, default=0.95,
+        help="Strength of the underlying sketch in UNPAINTED areas on step/per-color pages (0=no sketch, 1=full sketch)."
+    )
     args = parser.parse_args()
 
     # Load + preprocess
@@ -740,7 +732,7 @@ def main():
         ax3 = fig.add_subplot(gs[:, 1])
         ax1.imshow(img)
         t = ax1.set_title("Original", pad=2)
-        t.set_wrap(True)   # <-- wraps to the width of this (narrow) axes
+        t.set_wrap(True)
         ax1.axis("off")
 
         # MIXED PBN preview (no grid here for cleanliness)
@@ -749,7 +741,7 @@ def main():
             f"Paint by Numbers ({args.colors} colors) • model={args.mix_model} • max parts={args.max_parts}",
             pad=2
         )
-        t.set_wrap(True)  # <-- wraps to the width of this (narrow) axes
+        t.set_wrap(True)
         ax2.axis("off")
 
         # Key (swatch = MIXED color)
@@ -763,7 +755,7 @@ def main():
             deltaEs=deltaEs,
             swatch_step=0.55, swatch_w=0.55, right_margin=0.10, left_pad=1.10,
             no_band_bg=True, text_gap=0.03,
-            approx_palette=approx_uint8,     # <<< show the mixed color
+            approx_palette=approx_uint8,
         )
         pdf.savefig(fig, dpi=300)
         plt.close(fig)
@@ -773,22 +765,42 @@ def main():
         ax = fig.add_subplot(111)
         ax.imshow(sketch_img, cmap='gray')
         t = ax.set_title(f"Original Edge Sketch + Grid (step={args.grid_step}px)", pad=2)
-        t.set_wrap(True)  # <-- wraps to the width of this (narrow) axes
+        t.set_wrap(True)
         ax.axis("off")
         pdf.savefig(fig, dpi=300)
         plt.close(fig)
 
-        # Frame pages (¾ image / ¼ key) — all based on MIXED colors
+        # Shared sketch as RGB for compositing
+        sketch_rgb = np.array(sketch_img.convert("RGB"), dtype=np.uint8)
+        a = float(np.clip(args.sketch_alpha, 0.0, 1.0))
+
+        # Frame pages (¾ image / ¼ key) — sketch only in UNPAINTED areas
         for title, idxs, frame in frames_to_emit:
-            frame_with_grid = add_grid_to_rgb(frame, grid_step=args.grid_step, grid_color=200)
+            # Painted mask for this step
+            painted_mask = np.isin(labels_orig, np.array(idxs, dtype=np.uint8))
+            # Start with the painted frame as-is (paint not altered)
+            composite = frame.copy()
+
+            # Build faded-sketch background (white blended with sketch by alpha)
+            bg = ((1.0 - a) * 255.0 + a * sketch_rgb.astype(np.float32)).round().astype(np.uint8)
+
+            # Fill only the UNPAINTED pixels with the faded sketch
+            composite[~painted_mask] = bg[~painted_mask]
+
+            # Grid on top
+            frame_with_grid = add_grid_to_rgb(composite, grid_step=args.grid_step, grid_color=200)
+
+            # Layout
             fig = new_fig(A4_LANDSCAPE)
             gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
             axL = fig.add_subplot(gs[0, 0])
             axR = fig.add_subplot(gs[0, 1])
+
             axL.imshow(frame_with_grid)
-            t = axL.set_title(title + " + Grid", pad=2)
+            t = axL.set_title(title + " + Grid (sketch in unpainted areas)", pad=2)
+            t.set_wrap(True)
             axL.axis("off")
-            t.set_wrap(True)  # <-- wraps to the width of this (narrow) axes
+
             draw_color_key(axR, target_palette, all_recipes, all_entries, BASE_PALETTE,
                            used_indices=idxs,
                            title=f"Color Key • {title}",
@@ -797,26 +809,40 @@ def main():
                            show_components=not args.hide_components,
                            deltaEs=deltaEs,
                            left_pad=1.25, right_margin=0.18, text_gap=0.05,
-                           approx_palette=approx_uint8)     # <<< mixed swatch
+                           approx_palette=approx_uint8)
             pdf.savefig(fig, dpi=300)
             plt.close(fig)
 
-        # Optional: per-color pages (¾ / ¼)
+        # Optional: per-color pages (¾ / ¼) — sketch only in UNPAINTED areas
         if args.per_color_frames:
             for i in range(args.colors):
-                mask = (labels_orig == i)
-                frame_img = np.where(mask[..., None], pbn_image, 255).astype(np.uint8)
-                frame_with_grid = add_grid_to_rgb(frame_img, grid_step=args.grid_step, grid_color=200)
+                # Mask of where this color is present
+                painted_mask = (labels_orig == i)
 
+                # Paint-only frame: chosen color where present, white elsewhere
+                frame_img = np.where(painted_mask[..., None], pbn_image, 255).astype(np.uint8)
+
+                # Start with paint untouched
+                composite = frame_img.copy()
+
+                # Faded sketch background for unpainted regions
+                bg = ((1.0 - a) * 255.0 + a * sketch_rgb.astype(np.float32)).round().astype(np.uint8)
+                composite[~painted_mask] = bg[~painted_mask]
+
+                # Grid on top
+                frame_with_grid = add_grid_to_rgb(composite, grid_step=args.grid_step, grid_color=200)
+
+                # Figure/page layout
                 fig = new_fig(A4_LANDSCAPE)
                 gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
                 axL = fig.add_subplot(gs[0, 0])
                 axR = fig.add_subplot(gs[0, 1])
 
                 axL.imshow(frame_with_grid)
-                t = axL.set_title(f"Per-Color • #{i+1}", pad=2)
-                t.set_wrap(True)   # <-- wraps to the width of this (narrow) axes
+                t = axL.set_title(f"Per-Color • #{i+1} + Grid (sketch in unpainted areas)", pad=2)
+                t.set_wrap(True)
                 axL.axis("off")
+
                 draw_color_key(axR, target_palette, all_recipes, all_entries, BASE_PALETTE,
                                used_indices=[i],
                                title=f"Color Key • Color #{i+1}",
@@ -824,17 +850,18 @@ def main():
                                wrap_width=max(30, int(args.wrap * 0.7)),
                                show_components=not args.hide_components,
                                deltaEs=deltaEs,
-                               left_pad=1.25, right_margin=0.18, text_gap=0.05)
+                               left_pad=1.25, right_margin=0.18, text_gap=0.05,
+                               approx_palette=approx_uint8)
                 pdf.savefig(fig, dpi=300)
                 plt.close(fig)
 
-        # Final page: completed with grid
+        # Final page: completed with grid (no sketch underlay)
         completed_with_grid = add_grid_to_rgb(pbn_image, grid_step=args.grid_step, grid_color=200)
         fig = new_fig(A4_LANDSCAPE)
         ax = fig.add_subplot(111)
         ax.imshow(completed_with_grid)
         t = ax.set_title("Completed — All Colors Applied + Grid", pad=2)
-        t.set_wrap(True)  # <-- wraps to the width of this (narrow) axes
+        t.set_wrap(True)
         ax.axis("off")
         pdf.savefig(fig, dpi=300)
         plt.close(fig)
