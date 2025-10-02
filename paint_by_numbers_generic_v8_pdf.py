@@ -574,20 +574,31 @@ def new_fig(size):
 # ---------------------------
 def main():
     parser = argparse.ArgumentParser(description="A4 PDF with classic, value5, or combined 9-step frames.")
-    parser.add_argument("input", help="Input image file path")
-    parser.add_argument("--pdf", default="paint_by_numbers_guide.pdf", help="Output PDF path")
-    parser.add_argument("--colors", type=int, default=25)
-    parser.add_argument("--resize", type=int, nargs=2, default=[480, 480], metavar=("W", "H"))
+    parser.add_argument("input",
+                        help="Input image file path")
+    parser.add_argument("--pdf", default="paint_by_numbers_guide.pdf",
+                        help="Output PDF path")
+    parser.add_argument("--colors", type=int, default=30,
+                        help="Number of colors (KMeans clusters)")
+    parser.add_argument("--resize", type=int, nargs=2, default=[480, 480], metavar=("W", "H"),
+                        help="Resize input to WxH for KMeans")
     parser.add_argument("--palette", nargs="*", default=list(BASE_PALETTE.keys()))
-    parser.add_argument("--components", type=int, default=5)
-    parser.add_argument("--max-parts", type=int, default=10)
-    parser.add_argument("--mix-model", choices=["linear","lab","subtractive","km"], default="km")
+    parser.add_argument("--components", type=int, default=5,
+                        help="Max components per mixed color")
+    parser.add_argument("--max-parts", type=int, default=10,
+                        help="Max parts per mixed color")
+    parser.add_argument("--mix-model", choices=["linear","lab","subtractive","km"], default="km",
+                        help="Mixing model for recipes")
     parser.add_argument("--frame-mode", choices=["classic","value5","both","combined"], default="combined",
                         help="Frame set: classic (4+complete), value5 (5), both (separate), or combined (interleaved 9-step)")
-    parser.add_argument("--wrap", type=int, default=55)
-    parser.add_argument("--grid-step", type=int, default=80)
-    parser.add_argument("--edge-percentile", type=float, default=85.0)
-    parser.add_argument("--hide-components", action="store_true")
+    parser.add_argument("--wrap", type=int, default=55,
+                        help="Wrap width for color key text")
+    parser.add_argument("--grid-step", type=int, default=80,
+                        help="Grid spacing in pixels (0 = no grid)")
+    parser.add_argument("--edge-percentile", type=float, default=85.0,
+                        help="Edge detection percentile for sketch grid")
+    parser.add_argument("--hide-components", action="store_true",
+                        help="Do not show component swatches in color key")
     parser.add_argument("--per-color-frames", action="store_true",
                         help="If set, add a separate frame for each color (inserted before the completed page).")
     parser.add_argument(
