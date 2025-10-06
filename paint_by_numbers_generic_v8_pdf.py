@@ -65,6 +65,7 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 import cv2
 from PIL import Image
+from PIL import Image, ImageEnhance
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
@@ -196,6 +197,52 @@ def deltaE_lab(rgb1_u8: Sequence[int], rgb2_u8: Sequence[int]) -> float:
     """ΔE*ab between two sRGB colors (ΔE*ab; ΔE2000 would be stricter)."""
     return float(np.linalg.norm(rgb8_to_lab(np.array(rgb1_u8, dtype=np.float32)) -
                                 rgb8_to_lab(np.array(rgb2_u8, dtype=np.float32))))
+
+
+# ---------------------------
+# Clean-stencil helpers (adaptive threshold + light thinning + optional tone tweaks)
+# ---------------------------
+
+def _map_stencil_brightness_slider(value: float) -> float:
+    """0..1 → 0.5..2.0 (like your demo)."""
+    return 0.5 + float(np.clip(value, 0.0, 1.0)) * 1.5
+
+def _map_stencil_sharpness_slider(value: float) -> float:
+    """0..1 → 0.5..3.0 (like your demo)."""
+    return 0.5 + float(np.clip(value, 0.0, 1.0)) * 2.5
+
+def _adjust_brightness_rgb(image_rgb_u8: np.ndarray, factor: float) -> np.ndarray:
+    pil_img = Image.fromarray(image_rgb_u8)
+    out = ImageEnhance.Brightness(pil_img).enhance(float(factor))
+    return np.array(out)
+
+def _adjust_sharpness_rgb(image_rgb_u8: np.ndarray, factor: float) -> np.ndarray:
+    pil_img = Image.fromarray(image_rgb_u8)
+    out = ImageEnhance.Sharpness(pil_img).enhance(float(factor))
+    return np.array(out)
+
+def _apply_clean_stencil_rgb(image_rgb_u8: np.ndarray, *, block_size: int = 11, C: int = 2) -> np.ndarray:
+    """
+    Adaptive threshold + light erosion to get a crisp, printable stencil.
+    Input/Output: RGB uint8.
+    """
+    gray = cv2.cvtColor(image_rgb_u8, cv2.COLOR_RGB2GRAY)
+    block_size = max(3, block_size | 1)   # must be odd, >=3
+    C = int(C)
+
+    thresh = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        blockSize=block_size,
+        C=C
+    )
+
+    kernel = np.ones((2, 2), np.uint8)
+    thin = cv2.morphologyEx(thresh, cv2.MORPH_ERODE, kernel)
+
+    result = cv2.bitwise_not(thin)
+    return cv2.cvtColor(result, cv2.COLOR_GRAY2RGB)
 
 
 # ---------------------------
@@ -827,6 +874,18 @@ def main():
                    help="Alias for --outline-mode: old=image, new=labels, both=both. If set, it overrides --outline-mode.")
     p.add_argument("--label-regions", action="store_true",
                    help="Overlay region numbers at component centroids in frames (user-visible indices 1..K)")
+    # Clean-stencil pipeline (applies to the derived outline sketch before use)
+    p.add_argument("--apply-clean-stencil", action="store_true",
+                   help="If set, post-process the outline sketch with adaptive threshold + thinning and optional tone tweaks.")
+    p.add_argument("--stencil-brightness", type=float, default=1.0,
+                   help="Stencil brightness slider in [0..1] (mapped to 0.5..2.0).")
+    p.add_argument("--stencil-sharpness", type=float, default=1.0,
+                   help="Stencil sharpness slider in [0..1] (mapped to 0.5..3.0).")
+    p.add_argument("--stencil-block-size", type=int, default=11,
+                   help="Adaptive threshold block size (odd int >= 3).")
+    p.add_argument("--stencil-C", type=int, default=2,
+                   help="Adaptive threshold constant C (small int; higher → darker lines).")
+
     args = p.parse_args()
 
     # Map the alias onto outline-mode (alias wins if provided)
@@ -992,6 +1051,27 @@ def main():
             a = im2float01(sketch_gray); b = im2float01(label_outline_gray)
             outline_gray = float01_to_u8(np.clip(a * b, 0, 1))
 
+    # Optional clean-stencil post-processing of the outline
+    if outline_gray is not None and args.apply_clean_stencil:
+        # Work in RGB for the stencil helpers
+        outline_rgb = cv2.cvtColor(outline_gray, cv2.COLOR_GRAY2RGB)
+
+        # 1) Adaptive threshold + thinning
+        outline_rgb = _apply_clean_stencil_rgb(
+            outline_rgb,
+            block_size=int(args.stencil_block_size),
+            C=int(args.stencil_C),
+        )
+
+        # 2) Tone controls (mapped sliders)
+        b_factor = _map_stencil_brightness_slider(float(args.stencil_brightness))
+        s_factor = _map_stencil_sharpness_slider(float(args.stencil_sharpness))
+        outline_rgb = _adjust_brightness_rgb(outline_rgb, b_factor)
+        outline_rgb = _adjust_sharpness_rgb(outline_rgb, s_factor)
+
+        # Convert back to grayscale for the downstream multiply-underlay logic
+        outline_gray = cv2.cvtColor(outline_rgb, cv2.COLOR_RGB2GRAY)
+
     if outline_gray is not None:
         a = float(np.clip(args.sketch_alpha, 0.0, 1.0))
         sketch_norm = np.clip(outline_gray.astype(np.float32) / 255.0, 0.0, 1.0)
@@ -1025,24 +1105,51 @@ def main():
                        approx_palette=approx_uint8)
         pdf.savefig(fig, dpi=300); plt.close(fig)
 
-        # Page 2 (title reflects OLD vs NEW)
+        # Page 2 (Outline page uses the same image as the underlay)
         if outline_gray is not None:
-            if args.outline_mode == "image":
-                # Precisely the legacy look/title
-                legacy_page = original_edge_sketch_with_grid(img, grid_step=args.grid_step,
-                                                             grid_color=200,
-                                                             canny_high_pct=float(args.edge_percentile))
-                fig = new_fig(A4_LANDSCAPE); ax = fig.add_subplot(111)
-                ax.imshow(legacy_page, cmap='gray'); ax.set_title(f"Original Edge Sketch + Grid (step={args.grid_step}px)", pad=2); ax.axis("off")
-                pdf.savefig(fig, dpi=300); plt.close(fig)
-            else:
-                # New or combined outline page
-                fig = new_fig(A4_LANDSCAPE); ax = fig.add_subplot(111)
+            fig = new_fig(A4_LANDSCAPE);
+            ax = fig.add_subplot(111)
+
+            # If the clean-stencil pipeline was applied, outline_gray already reflects it.
+            if args.apply_clean_stencil:
+                # Show the post-processed (clean) stencil with the grid
                 ref_rgb = cv2.cvtColor(outline_gray, cv2.COLOR_GRAY2RGB)
                 ref_with_grid = add_grid_to_rgb(ref_rgb, grid_step=args.grid_step, grid_color=200)
-                ax.imshow(ref_with_grid); ax.set_title(
-                    f"Outline + Grid ({'labels' if args.outline_mode=='labels' else 'combined'}) (step={args.grid_step}px)", pad=2)
-                ax.axis("off"); pdf.savefig(fig, dpi=300); plt.close(fig)
+                mode_tag = (
+                    "labels" if args.outline_mode == "labels"
+                    else "combined" if args.outline_mode == "both"
+                    else "image"
+                )
+                ax.imshow(ref_with_grid)
+                ax.set_title(f"Clean Stencil Outline + Grid ({mode_tag}) (step={args.grid_step}px)", pad=2)
+                ax.axis("off")
+                pdf.savefig(fig, dpi=300);
+                plt.close(fig)
+
+            else:
+                # Legacy behavior (no clean stencil): keep the old special page for image-edges;
+                # otherwise show the raw outline/combined outline.
+                if args.outline_mode == "image":
+                    legacy_page = original_edge_sketch_with_grid(
+                        img, grid_step=args.grid_step, grid_color=200,
+                        canny_high_pct=float(args.edge_percentile)
+                    )
+                    ax.imshow(legacy_page, cmap='gray')
+                    ax.set_title(f"Original Edge Sketch + Grid (step={args.grid_step}px)", pad=2)
+                    ax.axis("off")
+                    pdf.savefig(fig, dpi=300);
+                    plt.close(fig)
+                else:
+                    ref_rgb = cv2.cvtColor(outline_gray, cv2.COLOR_GRAY2RGB)
+                    ref_with_grid = add_grid_to_rgb(ref_rgb, grid_step=args.grid_step, grid_color=200)
+                    ax.imshow(ref_with_grid)
+                    ax.set_title(
+                        f"Outline + Grid ({'labels' if args.outline_mode == 'labels' else 'combined'}) "
+                        f"(step={args.grid_step}px)", pad=2
+                    )
+                    ax.axis("off")
+                    pdf.savefig(fig, dpi=300);
+                    plt.close(fig)
 
         # Step pages
         for title, idxs, frame in frames_to_emit:
