@@ -64,7 +64,6 @@ from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import cv2
-from PIL import Image
 from PIL import Image, ImageEnhance
 
 import matplotlib.pyplot as plt
@@ -79,17 +78,18 @@ import textwrap as _tw
 
 # ---------------------------
 # Base “tube” paint palette
+# (Schminke Academy Oil)
 # ---------------------------
 
 BASE_PALETTE: Dict[str, Tuple[int, int, int]] = {
-    "Titanium White": (245, 245, 245),
-    "Lemon Yellow": (250, 239, 80),
-    "Vermillion Red": (214, 66, 50),
-    "Carmine": (170, 25, 60),
-    "Ultramarine": (25, 50, 140),
-    "Pthalo Green": (20, 100, 70),
-    "Yellow Ochre": (196, 158, 84),
-    "Lamp Black": (20, 20, 20),
+    "Titanium White": (218, 220, 224),
+    "Lemon Yellow": (232, 206, 6),
+    "Vermillion Red": (231, 44, 75),
+    "Carmine": (213, 14, 33),
+    "Ultramarine": (39, 51, 115),
+    "Pthalo Green": (4, 95, 94),
+    "Yellow Ochre": (200, 143, 16),
+    "Lamp Black": (24, 14, 19),
 }
 
 
@@ -838,7 +838,7 @@ def main():
     p = argparse.ArgumentParser(description="A4 PDF paint-by-numbers generator (professional fidelity).")
     p.add_argument("input", help="Input image file path")
     p.add_argument("--pdf", default="paint_by_numbers_guide.pdf", help="Output PDF path")
-    p.add_argument("--colors", type=int, default=30, help="Number of colors (KMeans clusters)")
+    p.add_argument("--colors", type=int, default=25, help="Number of colors (KMeans clusters)")
     p.add_argument("--resize", type=int, nargs=2, metavar=("W", "H"),
                    help="Optional resize WxH for KMeans only (keeps output at full res). Omit to keep original.")
     p.add_argument("--cluster-space", choices=["lab", "rgb"], default="lab",
