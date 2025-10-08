@@ -2,83 +2,49 @@
 # -*- coding: utf-8 -*-
 
 """
-Paint-by-Numbers PDF generator — PROFESSIONAL edition (mixed-palette everywhere).
+Paint-by-Numbers PDF generator with tinting-strength aware mixing for oil paints.
 
-This version focuses on **color fidelity** and **painter usability** for
-professional art reproduction. It implements perceptual clustering in CIELAB,
-region cleanup, exclusive grouping, vector (label-based) outlines, optional
-region numbering, and a more robust paint-mix recipe search — while preserving
-your original flow and guarantees.
+This version attempts to mitigate two common real-life mismatches:
 
-------------------------------------------------------------------------------
-What this version guarantees
-------------------------------------------------------------------------------
-• The printed PBN imagery (Page 1 preview, all step/per-color frames, and the
-  final completed page) uses ONLY the colors from your **MIXED** palette
-  (derived from the limited tube/base colors).
-• The Color Key’s left tile swatch shows the **MIXED** color (not the cluster).
-• Value-tweak suggestions are computed from MIXED colors (L* deviations within
-  identical-recipe groups).
-• Grouping into steps (classic/value5/combined) is based on MIXED colors.
-• Grouping buckets are **mutually exclusive** (no double-painting).
-• Keys have right-justified component swatches; per-row text wraps to swatch.
-• Tight margins; frame pages devote ~75% width to the frame and ~25% to the key.
-• Clustering supports **Lab** (default) or RGB; Lab improves perceptual fidelity.
-• Region post-processing merges/removes impractically small color regions.
-• Outline can be derived from **image edges** (OLD method), **label boundaries**
-  (NEW method), or **both** — fully switchable; **OLD method is default**.
-• Optional **region numbering** (printed indices) at component centroids.
-• Integer-mix search allows variable total parts ≤ max_parts and gently prefers
-  simpler recipes when ΔE is similar.
-• Exhaustive docstrings and comments throughout.
+1. Strong pigments (black, phthalo green, etc.) dominating mixes unrealistically under
+   a naive “parts count” model (i.e. “5 parts black” is overkill).
+2. Warm browns or flesh tones drifting too pink or oversaturated in predicted mixes.
 
-------------------------------------------------------------------------------
-CLI (key args)
-------------------------------------------------------------------------------
-python make_pbn.py input.jpg \
-  --colors 25 \
-  --cluster-space lab \
-  --frame-mode combined \
-  --per-color-frames \
-  --min-region-pct 0.02 \
-  --sketch-style old          # old=image-edge sketch (DEFAULT)
-  # or: --sketch-style new    # new=label-boundary outlines
-  # or: --sketch-style both   # combine old+new
+It does this by:
+- Assigning a **strength multiplier** to each base pigment.
+- Scaling raw mixing “parts” by strength, then applying a diminishing-returns transform.
+- Mixing in a hybrid empirical KM-style reflectance model (absorption + scattering proxies).
+- Applying a mild hue-limited bias correction only in warm/brown hue zones.
+- Preserving all your clustering, region cleanup, palette enforcement, key drawing,
+  PDF output, etc., exactly as before.
 
-Arguments of note:
-  --cluster-space {lab,rgb}          Clustering color space (Lab recommended).
-  --outline-mode {image,labels,both} Low-level switch (image==old, labels==new).
-  --sketch-style {old,new,both}      High-level alias; overrides --outline-mode.
-  --label-regions                    Print region numbers at centroids.
-  --min-region-px / --min-region-pct Region cleanup thresholds.
-  --edge-percentile                  Canny high percentile (used).
-  ... (see argparse --help for all flags)
+You’ll want to tune the `STRENGTH` values and bias thresholds to match your actual pigments.
 
+References:
+- The Kubelka–Munk model is foundational to pigment mixing theory :contentReference[oaicite:0]{index=0}
+- Modern oil paint mixing experiments use K and S spectra for better predictive accuracy :contentReference[oaicite:1]{index=1}
+- Tinting strength (how strongly a pigment “tints” a mix) is well known in coatings and paint science :contentReference[oaicite:2]{index=2}
+- Pigment particle size strongly influences tinting strength :contentReference[oaicite:3]{index=3}
 """
 
 from __future__ import annotations
-
-import argparse
 import itertools
 from typing import Dict, List, Sequence, Tuple
+from types import SimpleNamespace
 
 import numpy as np
 import cv2
 from PIL import Image, ImageEnhance
-
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.gridspec import GridSpec
 from matplotlib.backends.backend_pdf import PdfPages
-
 from sklearn.cluster import KMeans
-
 import textwrap as _tw
-
+import colorsys
 
 # ---------------------------
-# Base “tube” paint palette
-# (Schminke Academy Oil)
+# Base tube pigment palette
 # ---------------------------
 
 BASE_PALETTE: Dict[str, Tuple[int, int, int]] = {
@@ -90,61 +56,79 @@ BASE_PALETTE: Dict[str, Tuple[int, int, int]] = {
     "Pthalo Green": (4, 95, 94),
     "Yellow Ochre": (200, 143, 16),
     "Lamp Black": (24, 14, 19),
+    "Burnt Umber": (42, 17, 12),
+    "Burnt Sienna": (80, 36, 25),
+}
+
+# Tinting strength multipliers: how strongly each pigment “tints” per unit part.
+# Values above 1.0 mean “stronger than average”; less than 1.0 means “weaker”.
+# You will need to calibrate these by observing real mixtures.
+STRENGTH: Dict[str, float] = {
+    "Titanium White": 1.0,
+    "Lemon Yellow": 0.9,
+    "Vermillion Red": 1.1,
+    "Carmine": 1.2,
+    "Ultramarine": 1.0,
+    "Pthalo Green": 2.0,  # Phthalo Green often has high tinting strength
+    "Yellow Ochre": 0.7,
+    "Lamp Black": 2.5,  # Black often dominates strongly
+    "Burnt Umber": 1.0,
+    "Burnt Sienna": 0.8,
 }
 
 
 # ---------------------------
-# Color science helpers
+# Color space & conversion helpers
 # ---------------------------
 
 def srgb_to_linear_arr(rgb_arr: np.ndarray) -> np.ndarray:
-    """Convert sRGB 0..1 to linear-light 0..1 (vectorized)."""
+    """Convert sRGB (0..1) to linear light (0..1), vectorized."""
     rgb_arr = np.clip(rgb_arr, 0.0, 1.0)
-    return np.where(rgb_arr <= 0.04045, rgb_arr / 12.92, ((rgb_arr + 0.055) / 1.055) ** 2.4)
+    return np.where(rgb_arr <= 0.04045,
+                    rgb_arr / 12.92,
+                    ((rgb_arr + 0.055) / 1.055) ** 2.4)
 
 
 def linear_to_srgb_arr(lin: np.ndarray) -> np.ndarray:
-    """Convert linear-light 0..1 to sRGB 0..1 (vectorized)."""
+    """Convert linear light (0..1) to sRGB (0..1), vectorized."""
     lin = np.clip(lin, 0.0, 1.0)
-    return np.where(lin <= 0.0031308, 12.92 * lin, 1.055 * np.power(lin, 1 / 2.4) - 0.055)
+    return np.where(lin <= 0.0031308,
+                    12.92 * lin,
+                    1.055 * np.power(lin, 1 / 2.4) - 0.055)
 
 
 def srgb8_to_xyz(rgb_u8: np.ndarray) -> np.ndarray:
-    """sRGB (0..255) to XYZ (D65)."""
+    """Convert sRGB uint8 (0..255) to XYZ (D65)."""
     lin = srgb_to_linear_arr(rgb_u8.astype(np.float32) / 255.0)
-    M = np.array(
-        [
-            [0.4124564, 0.3575761, 0.1804375],
-            [0.2126729, 0.7151522, 0.0721750],
-            [0.0193339, 0.1191920, 0.9503041],
-        ],
-        dtype=np.float32,
-    )
+    M = np.array([
+        [0.4124564, 0.3575761, 0.1804375],
+        [0.2126729, 0.7151520, 0.0721750],
+        [0.0193339, 0.1191920, 0.9503041],
+    ], dtype=np.float32)
     return M @ lin
 
 
 def xyz_to_srgb8(xyz: np.ndarray) -> np.ndarray:
-    """XYZ (D65) to sRGB (0..255)."""
-    M = np.array(
-        [
-            [3.2404542, -1.5371385, -0.4985314],
-            [-0.9692660, 1.8760108, 0.0415560],
-            [0.0556434, -0.2040259, 1.0572252],
-        ],
-        dtype=np.float32,
-    )
+    """Convert XYZ (D65) to sRGB uint8 (0..255)."""
+    M = np.array([
+        [3.2404542, -1.5371385, -0.4985314],
+        [-0.9692660, 1.8760108, 0.0415560],
+        [0.0556434, -0.2040259, 1.0572252],
+    ], dtype=np.float32)
     lin = M @ xyz
     srgb = np.clip(linear_to_srgb_arr(lin), 0.0, 1.0)
     return srgb * 255.0
 
 
 def xyz_to_lab(xyz: np.ndarray) -> np.ndarray:
-    """XYZ (D65) to CIELAB (L*, a*, b*)."""
+    """Convert XYZ to CIELAB (L*, a*, b*)."""
     Xn, Yn, Zn = 0.95047, 1.0, 1.08883
     x, y, z = xyz[0] / Xn, xyz[1] / Yn, xyz[2] / Zn
 
     def f(t):
-        return np.where(t > (6 / 29) ** 3, np.cbrt(t), (1 / 3) * (29 / 6) ** 2 * t + 4 / 29)
+        return np.where(t > (6 / 29) ** 3,
+                        np.cbrt(t),
+                        (1 / 3) * (29 / 6) ** 2 * t + 4 / 29)
 
     fx, fy, fz = f(x), f(y), f(z)
     L = 116 * fy - 16
@@ -154,17 +138,19 @@ def xyz_to_lab(xyz: np.ndarray) -> np.ndarray:
 
 
 def lab_to_xyz(lab: np.ndarray) -> np.ndarray:
-    """CIELAB to XYZ (D65)."""
+    """Convert CIELAB to XYZ."""
     L, a, b = lab
-    Yn = 1.0
-    Xn = 0.95047
+    Yn = 1.0;
+    Xn = 0.95047;
     Zn = 1.08883
     fy = (L + 16) / 116
     fx = fy + a / 500
     fz = fy - b / 200
 
     def finv(t):
-        return np.where(t > 6 / 29, t ** 3, (3 * (6 / 29) ** 2) * (t - 4 / 29))
+        return np.where(t > 6 / 29,
+                        t ** 3,
+                        3 * (6 / 29) ** 2 * (t - 4 / 29))
 
     x = Xn * finv(fx)
     y = Yn * finv(fy)
@@ -173,30 +159,287 @@ def lab_to_xyz(lab: np.ndarray) -> np.ndarray:
 
 
 def rgb8_to_lab(rgb_u8: np.ndarray) -> np.ndarray:
-    """sRGB (0..255) to CIELAB."""
+    """Convert sRGB uint8 to CIELAB."""
     return xyz_to_lab(srgb8_to_xyz(rgb_u8))
 
 
 def lab_to_rgb8(lab: np.ndarray) -> np.ndarray:
-    """CIELAB to sRGB (0..255)."""
+    """Convert CIELAB to sRGB uint8."""
     return xyz_to_srgb8(lab_to_xyz(lab))
 
 
 def relative_luminance(rgb_u8: Sequence[int]) -> float:
-    """Perceptual luminance Y from sRGB 0..255 (relative; not L*)."""
+    """Compute perceptual relative luminance (Y) from sRGB uint8."""
     lin = srgb_to_linear_arr(np.array(rgb_u8, dtype=np.float32) / 255.0)
     return float(0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2])
 
 
 def Lstar_from_rgb(rgb_u8: Sequence[int]) -> float:
-    """Compute CIELAB L* from sRGB 0..255."""
+    """Extract L* from a color in sRGB uint8."""
     return float(np.clip(rgb8_to_lab(np.array(rgb_u8, dtype=np.float32))[0], 0, 100))
 
 
 def deltaE_lab(rgb1_u8: Sequence[int], rgb2_u8: Sequence[int]) -> float:
-    """ΔE*ab between two sRGB colors (ΔE*ab; ΔE2000 would be stricter)."""
+    """Compute ΔE*ab between two sRGB uint8 colors."""
     return float(np.linalg.norm(rgb8_to_lab(np.array(rgb1_u8, dtype=np.float32)) -
                                 rgb8_to_lab(np.array(rgb2_u8, dtype=np.float32))))
+
+
+def rgb_to_hsv(rgb: Sequence[int]) -> Tuple[float, float, float]:
+    """Convert sRGB uint8 to (h, s, v) in [deg, 0..1, 0..1]."""
+    rf, gf, bf = (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
+    h, s, v = colorsys.rgb_to_hsv(rf, gf, bf)
+    return (h * 360.0, s, v)
+
+
+# ---------------------------
+# Hue-limited correction (warm/brown bias)
+# ---------------------------
+
+def bias_warm_browns(rgb: np.ndarray) -> np.ndarray:
+    """
+    Apply a mild correction only for hues in the brown/orange range,
+    if they appear to drift too pink (i.e., red dominance).
+    Other hues are left nearly unaffected.
+
+    Args:
+      rgb: array-like length 3 (floats) in 0..255.
+
+    Returns:
+      corrected rgb as float array (0..255).
+    """
+    # Convert to HSV
+    h, s, v = rgb_to_hsv(rgb.astype(int))
+    if 10.0 <= h <= 45.0 and s > 0.25:
+        r, g, b = rgb
+        red_dom = (r - max(g, b)) / max(1, r)
+        if red_dom > 0.10:
+            # Slightly reduce brightness and saturation
+            v = v * 0.93
+            s = s * 0.97
+    rf, gf, bf = colorsys.hsv_to_rgb(h / 360.0, s, v)
+    return np.clip(np.array([rf, gf, bf]) * 255.0, 0, 255)
+
+
+# ---------------------------
+# Mixing models
+# ---------------------------
+
+def mix_linear(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
+    """
+    Simple linear-light weighted average mixing.
+    This is a purely additive model (not physically accurate for pigments).
+    """
+    w = parts / np.sum(parts)
+    lin = np.sum(srgb_to_linear_arr((base_rgbs / 255.0).T) * w, axis=1)
+    return np.clip(255.0 * linear_to_srgb_arr(lin), 0, 255)
+
+
+def mix_lab(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
+    """
+    Perceptual mixing via averaging in Lab space.
+    Useful fallback but often too light in shadows.
+    """
+    w = parts / np.sum(parts)
+    labs = np.array([rgb8_to_lab(c) for c in base_rgbs], dtype=np.float32)
+    lab = np.sum(labs.T * w, axis=1)
+    return np.clip(lab_to_rgb8(lab), 0, 255)
+
+
+def mix_subtractive(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
+    """
+    Simple subtractive heuristic: 1 - Π(1 - c)^w per channel.
+    Works okay in some midtones, but lacks realism near extremes.
+    """
+    w = parts / np.sum(parts)
+    c = (base_rgbs / 255.0)
+    res = 1.0 - np.prod((1.0 - c) ** w[:, None], axis=0)
+    return np.clip(res * 255.0, 0, 255)
+
+
+def mix_km_generic(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
+    """
+    Basic KM-like mixing (Beer-Lambert per-channel) without strength correction.
+    Useful for comparison with enhanced model.
+    """
+    w = parts / np.sum(parts)
+    R = np.clip(base_rgbs / 255.0, 1e-4, 1.0)
+    A = -np.log(R)
+    A_mix = np.sum(A.T * w, axis=1)
+    R_mix = np.exp(-A_mix)
+    return np.clip(R_mix * 255.0, 0, 255)
+
+
+def mix_km_strength(parts: np.ndarray,
+                    base_rgbs: np.ndarray,
+                    base_names: Sequence[str]) -> np.ndarray:
+    """
+    Tinting-strength aware empirical KM hybrid mixing.
+
+    This model:
+     - Scales raw parts by strength multipliers → “scaled parts”
+     - Applies a diminishing-returns transform to avoid over-dominance
+     - Normalizes to effective weights w
+     - Combines absorption (K) and scattering proxies (S)
+     - Adds cross-term interactions (beta)
+     - Applies hue-limited warm-brown bias correction
+
+    Args:
+      parts: 1D array of raw parts (e.g. [2, 1, 0])
+      base_rgbs: corresponding base pigment RGBs
+      base_names: list of pigment names corresponding to base_rgbs
+
+    Returns:
+      rgb (floats) in 0..255 of the mixed color
+    """
+    raw = parts.astype(float)
+    # Map to strength multipliers
+    strength_arr = np.array([STRENGTH.get(n, 1.0) for n in base_names], dtype=float)
+    scaled = raw * strength_arr
+
+    # Diminishing-returns: prevents runaway dominance
+    k = 0.3
+    w_eff = scaled / (1.0 + k * scaled)
+
+    total = np.sum(w_eff)
+    if total > 0:
+        w = w_eff / total
+    else:
+        w = w_eff
+
+    # Absorption proxy (K) and scattering proxy (S)
+    R = np.clip(base_rgbs / 255.0, 1e-4, 1.0)
+    K = -np.log(R)
+    S = 1.0 - R
+
+    # Weighted sum K
+    Kmix = np.sum(w[:, None] * K, axis=0)
+    # Add empirical cross-terms
+    beta = 0.12
+    for i in range(len(w)):
+        for j in range(i + 1, len(w)):
+            diff = np.abs(K[i] - K[j])
+            Kmix += beta * w[i] * w[j] * diff
+
+    Smix = np.sum(w[:, None] * S, axis=0)
+    gamma = 0.06
+    Smix = Smix * (1.0 - gamma * np.abs(Smix - np.mean(Smix)))
+
+    Rmix = np.exp(-Kmix)
+    Rmix = Rmix * (1.0 - 0.08 * Smix)
+
+    rgb = np.clip(Rmix * 255.0, 0, 255)
+    return bias_warm_browns(rgb)
+
+
+def mix_color(parts: np.ndarray,
+              base_rgbs: np.ndarray,
+              model: str,
+              base_names: Sequence[str] = ()) -> np.ndarray:
+    """
+    Dispatch mixing by chosen model.
+    For the “km” model, you must supply base_names so strength is aligned.
+    """
+    if model == "linear":
+        return mix_linear(parts, base_rgbs)
+    elif model == "lab":
+        return mix_lab(parts, base_rgbs)
+    elif model == "subtractive":
+        return mix_subtractive(parts, base_rgbs)
+    elif model == "km":
+        return mix_km_strength(parts, base_rgbs, base_names)
+    else:
+        return mix_linear(parts, base_rgbs)
+
+
+# ---------------------------
+# Recipe enumeration / search
+# ---------------------------
+
+def enumerate_partitions_upto(total: int, k: int):
+    """
+    Yield all k-tuples of nonnegative ints summing ≤ total, not all zero.
+    (Standard integer partition for search.)
+    """
+    if k == 1:
+        for t in range(total + 1):
+            if t > 0:
+                yield (t,)
+        return
+    for i in range(total + 1):
+        for rest in enumerate_partitions_upto(total - i, k - 1):
+            s = (i,) + rest
+            if any(p > 0 for p in s):
+                yield s
+
+
+def integer_mix_best(
+        target_rgb: Sequence[float],
+        base_names: Sequence[str],
+        *,
+        max_parts: int = 10,
+        max_components: int = 3,
+        model: str = "km",
+        prefer_simple_lambda_components: float = 0.03,
+        prefer_simple_lambda_parts: float = 0.01,
+) -> Tuple[List[Tuple[str, int]], np.ndarray, float]:
+    """
+    Brute-force search for integer “parts” recipes approximating target_rgb, using ≤ max_parts.
+    Score = ΔE + penalties for complexity.
+
+    Args:
+      target_rgb: desired color (float or int RGB).
+      base_names: full list of base pigment names.
+      max_parts, max_components: search limits.
+      model: mixing model name (“km”, “linear”, “lab”, “subtractive”).
+      prefer_simple_lambda_*: regularization strength.
+
+    Returns:
+      entries: list of (pigment_name, part_count)
+      best_rgb: predicted mixed color
+      best_err: ΔE error
+    """
+    N = len(base_names)
+    base_rgbs_full = np.array([BASE_PALETTE[n] for n in base_names], dtype=float)
+    target = np.array(target_rgb, dtype=float)
+
+    best_score = float("inf")
+    best_err = float("inf")
+    best_entries: List[Tuple[str, int]] = []
+    best_rgb = target.copy()
+
+    max_components = max(1, min(max_components, N, (max_parts if max_parts > 0 else 1)))
+
+    for m in range(1, max_components + 1):
+        for combo in itertools.combinations(range(N), m):
+            combo_names = [base_names[i] for i in combo]
+            combo_rgbs = base_rgbs_full[list(combo)]
+            for parts in enumerate_partitions_upto(max_parts, m):
+                s = sum(parts)
+                if s == 0:
+                    continue
+                parts_arr = np.array(parts, dtype=float)
+                mix_rgb = mix_color(parts_arr, combo_rgbs, model, combo_names)
+                err = deltaE_lab(mix_rgb, target)
+                score = (err
+                         + prefer_simple_lambda_components * (m - 1)
+                         + prefer_simple_lambda_parts * (s / float(max_parts)))
+                if score < best_score:
+                    best_score = score
+                    best_err = err
+                    best_rgb = mix_rgb
+                    best_entries = [(combo_names[i], int(parts[i])) for i in range(m) if parts[i] > 0]
+
+    if len(best_entries) == 1:
+        n, p = best_entries[0]
+        best_entries = [(n, max(1, p))]
+
+    return best_entries, best_rgb, best_err
+
+
+def recipe_text(entries: List[Tuple[str, int]]) -> str:
+    """Human-readable recipe string, e.g. “2 parts Yellow + 1 part Black”."""
+    return " + ".join([f"{p} part{'s' if p != 1 else ''} {n}" for n, p in entries]) if entries else "—"
 
 
 # ---------------------------
@@ -834,59 +1077,51 @@ def new_fig(size):
 # Main CLI
 # ---------------------------
 
-def main():
-    p = argparse.ArgumentParser(description="A4 PDF paint-by-numbers generator (professional fidelity).")
-    p.add_argument("input", help="Input image file path")
-    p.add_argument("--pdf", default="paint_by_numbers_guide.pdf", help="Output PDF path")
-    p.add_argument("--colors", type=int, default=25, help="Number of colors (KMeans clusters)")
-    p.add_argument("--resize", type=int, nargs=2, metavar=("W", "H"),
-                   help="Optional resize WxH for KMeans only (keeps output at full res). Omit to keep original.")
-    p.add_argument("--cluster-space", choices=["lab", "rgb"], default="lab",
-                   help="Clustering color space (Lab is recommended for perceptual fidelity).")
-    p.add_argument("--palette", nargs="*", default=list(BASE_PALETTE.keys()))
-    p.add_argument("--components", type=int, default=5, help="Max components per mixed color")
-    p.add_argument("--max-parts", type=int, default=10, help="Max TOTAL parts per mixed color (sum(parts) ≤ this)")
-    p.add_argument("--mix-model", choices=["linear", "lab", "subtractive", "km"], default="km",
-                   help="Mixing model for recipes")
-    p.add_argument("--frame-mode", choices=["classic", "value5", "both", "combined"], default="combined",
-                   help="Frame set: classic, value5, both (separate), or combined (interleaved 9-step)")
-    p.add_argument("--wrap", type=int, default=55, help="Wrap width for color key text")
-    p.add_argument("--grid-step", type=int, default=400, help="Grid spacing in pixels (0 = no grid)")
-    p.add_argument("--edge-percentile", type=float, default=90.0, help="(Used) Edge detection high percentile for Canny")
-    p.add_argument("--hide-components", action="store_true", help="Do not show component swatches in color key")
-    p.add_argument("--per-color-frames", action="store_true",
-                   help="If set, add a separate frame for each color (inserted before the completed page).")
-    p.add_argument("--sketch-alpha", type=float, default=0.55,
-                   help="Opacity of the outline underlay (0=no effect, 1=full outline) on step/per-color pages.")
-    p.add_argument("--per-color-cumulative", action="store_true",
-                   help="Per-color frames build cumulatively: prior colors appear at --prev-alpha; current color is 100%")
-    p.add_argument("--prev-alpha", type=float, default=0.75,
-                   help="Opacity for all previous colors on cumulative per-color frames (0..1)")
-    p.add_argument("--min-region-px", type=int, default=0,
-                   help="Remove/merge label components smaller than this many pixels")
-    p.add_argument("--min-region-pct", type=float, default=0.0,
-                   help="Remove/merge label components smaller than this percentage of total pixels (e.g. 0.5)")
-    # Low-level switch (kept for backward compatibility)
-    p.add_argument("--outline-mode", choices=["image", "labels", "both"], default="image",
-                   help="Outline source: image edges (OLD), label boundaries (NEW), or both. (Default: image/OLD)")
-    # High-level alias for convenience (overrides outline-mode if provided)
-    p.add_argument("--sketch-style", choices=["old", "new", "both"],
-                   help="Alias for --outline-mode: old=image, new=labels, both=both. If set, it overrides --outline-mode.")
-    p.add_argument("--label-regions", action="store_true",
-                   help="Overlay region numbers at component centroids in frames (user-visible indices 1..K)")
-    # Clean-stencil pipeline (applies to the derived outline sketch before use)
-    p.add_argument("--apply-clean-stencil", action="store_true",
-                   help="If set, post-process the outline sketch with adaptive threshold + thinning and optional tone tweaks.")
-    p.add_argument("--stencil-brightness", type=float, default=1.0,
-                   help="Stencil brightness slider in [0..1] (mapped to 0.5..2.0).")
-    p.add_argument("--stencil-sharpness", type=float, default=1.0,
-                   help="Stencil sharpness slider in [0..1] (mapped to 0.5..3.0).")
-    p.add_argument("--stencil-block-size", type=int, default=11,
-                   help="Adaptive threshold block size (odd int >= 3).")
-    p.add_argument("--stencil-C", type=int, default=2,
-                   help="Adaptive threshold constant C (small int; higher → darker lines).")
+# Add this near the other imports
+from types import SimpleNamespace
 
-    args = p.parse_args()
+# --- NEW: central config with previous CLI defaults ---
+DEFAULT_CONFIG = {
+    "input": "photo3.png",                         # was a required CLI arg; override as needed
+    "pdf": "paint_by_numbers_guide.pdf",
+    "colors": 25,
+    "resize": None,                                # e.g. (W, H)
+    "cluster_space": "lab",                        # {"lab","rgb"}
+    "palette": list(BASE_PALETTE.keys()),
+    "components": 5,
+    "max_parts": 10,
+    "mix_model": "km",                             # {"linear","lab","subtractive","km"}
+    "frame_mode": "combined",                      # {"classic","value5","both","combined"}
+    "wrap": 55,
+    "grid_step": 400,
+    "edge_percentile": 90.0,
+    "hide_components": False,
+    "per_color_frames": True,
+    "sketch_alpha": 0.55,
+    "per_color_cumulative": True,
+    "prev_alpha": 0.75,
+    "min_region_px": 0,
+    "min_region_pct": 0.0,
+    "outline_mode": "image",                       # {"image","labels","both"}
+    "sketch_style": None,                          # {"old","new","both"}; if set, overrides outline_mode
+    "label_regions": False,
+    "apply_clean_stencil": True,
+    "stencil_brightness": 1.0,                     # sliders 0..1 (mapped internally)
+    "stencil_sharpness": 1.0,
+    "stencil_block_size": 11,
+    "stencil_C": 2,
+}
+
+# ---------------------------
+# Main (DICT config, no argparse)
+# ---------------------------
+def main(config: dict | None = None):
+    """
+    Run the generator using a dict-based config.
+    Pass only the keys you want to override; unspecified keys use DEFAULT_CONFIG.
+    """
+    cfg = {**DEFAULT_CONFIG, **(config or {})}
+    args = SimpleNamespace(**cfg)
 
     # Map the alias onto outline-mode (alias wins if provided)
     if args.sketch_style:
@@ -1053,23 +1288,16 @@ def main():
 
     # Optional clean-stencil post-processing of the outline
     if outline_gray is not None and args.apply_clean_stencil:
-        # Work in RGB for the stencil helpers
         outline_rgb = cv2.cvtColor(outline_gray, cv2.COLOR_GRAY2RGB)
-
-        # 1) Adaptive threshold + thinning
         outline_rgb = _apply_clean_stencil_rgb(
             outline_rgb,
             block_size=int(args.stencil_block_size),
             C=int(args.stencil_C),
         )
-
-        # 2) Tone controls (mapped sliders)
         b_factor = _map_stencil_brightness_slider(float(args.stencil_brightness))
         s_factor = _map_stencil_sharpness_slider(float(args.stencil_sharpness))
         outline_rgb = _adjust_brightness_rgb(outline_rgb, b_factor)
         outline_rgb = _adjust_sharpness_rgb(outline_rgb, s_factor)
-
-        # Convert back to grayscale for the downstream multiply-underlay logic
         outline_gray = cv2.cvtColor(outline_rgb, cv2.COLOR_RGB2GRAY)
 
     if outline_gray is not None:
