@@ -43,6 +43,10 @@ from sklearn.cluster import KMeans
 import textwrap as _tw
 import colorsys
 
+import svgwrite
+from skimage.morphology import skeletonize
+from skimage import measure
+
 # ---------------------------
 # Base tube pigment palette
 # ---------------------------
@@ -892,39 +896,6 @@ def label_boundaries_u8(labels_u8: np.ndarray, thick_px: int = 1) -> np.ndarray:
     return edges
 
 
-def label_component_centers(labels_u8: np.ndarray) -> Dict[int, List[Tuple[float, float]]]:
-    """Connected components per label → list of centers (cx, cy) per label."""
-    H, W = labels_u8.shape
-    centers_by_label: Dict[int, List[Tuple[float, float]]] = {}
-    for lab in np.unique(labels_u8):
-        mask = (labels_u8 == lab).astype(np.uint8) * 255
-        num, cc_labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
-        pts = []
-        for i in range(1, num):
-            cx, cy = centroids[i]
-            pts.append((float(cx), float(cy)))
-        centers_by_label[int(lab)] = pts
-    return centers_by_label
-
-
-def draw_region_numbers_rgb(
-    rgb_img_u8: np.ndarray,
-    centers_by_label: Dict[int, List[Tuple[float, float]]],
-    *,
-    font_scale: float = 0.5,
-    thickness: int = 1,
-) -> np.ndarray:
-    """Overlay numeric labels at component centroids with readable outline."""
-    out = rgb_img_u8.copy()
-    for lab, pts in centers_by_label.items():
-        label_str = str(int(lab) + 1)  # user-facing indices 1..K
-        for (cx, cy) in pts:
-            pos = (int(round(cx)), int(round(cy)))
-            cv2.putText(out, label_str, pos, cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
-            cv2.putText(out, label_str, pos, cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
-    return out
-
-
 def add_grid_to_rgb(arr: np.ndarray, grid_step=80, grid_color=200) -> np.ndarray:
     """Overlay a grid onto an RGB uint8 image array, non-destructively."""
     out = arr.copy()
@@ -1073,12 +1044,114 @@ def new_fig(size):
     return fig
 
 
+# ==============================================================
+# Centerline tracing (convert stencil to single-line SVG)
+# ==============================================================
+
+def _gray_int_to_hex(c: int) -> str:
+    """200 -> '#C8C8C8' etc."""
+    c = int(np.clip(c, 0, 255))
+    h = f"{c:02X}"
+    return f"#{h}{h}{h}"
+
+def run_centerline_trace(args):
+    """
+    Generate a single-stroke centerline SVG from the final clean stencil outline,
+    and overlay a grid in the SVG.
+
+    Expects on `args`:
+      - export_centerline_svg: bool
+      - centerline_output: str
+      - centerline_blur, centerline_threshold, centerline_otsu,
+        centerline_dilate, centerline_simplify
+      - outline_gray: np.ndarray (grayscale stencil to trace)
+      - grid_step: int           # <-- used for SVG grid
+      - (optional) grid_color: int (0..255)  # if not present, use 200
+    """
+    if not hasattr(args, "outline_gray") or args.outline_gray is None:
+        print("⚠️  No stencil available for centerline tracing — skipped.")
+        return
+
+    gray = args.outline_gray
+    img = cv2.GaussianBlur(gray, (args.centerline_blur, args.centerline_blur), 0) if args.centerline_blur > 0 else gray
+
+    # Threshold
+    if args.centerline_otsu:
+        _, bw = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    else:
+        t = args.centerline_threshold if args.centerline_threshold is not None else 128
+        _, bw = cv2.threshold(img, int(t), 255, cv2.THRESH_BINARY_INV)
+
+    # Dilation (optional) to connect gaps
+    if args.centerline_dilate > 0:
+        kernel = np.ones((2, 2), np.uint8)
+        bw = cv2.dilate(bw, kernel, iterations=args.centerline_dilate)
+
+    # Skeletonize to centerlines
+    skel = skeletonize((bw > 0).astype(np.uint8)).astype(np.uint8)
+
+    # Extract contours as polylines
+    contours = measure.find_contours(skel, 0.5)
+    h, w = skel.shape
+
+    # Prepare SVG
+    dwg = svgwrite.Drawing(args.centerline_output, size=(w, h))
+    # Optional: white background rect, if you prefer explicit white:
+    # dwg.add(dwg.rect(insert=(0, 0), size=(w, h), fill="#FFFFFF"))
+
+    # ---------------------------
+    # Add GRID (draw first so it's behind the strokes)
+    # ---------------------------
+    grid_step = int(getattr(args, "grid_step", 250))
+    grid_gray = int(getattr(args, "grid_color", 200))
+    grid_hex = _gray_int_to_hex(grid_gray)
+
+    if grid_step > 0:
+        # Vertical lines
+        x = 0
+        while x <= w:
+            dwg.add(dwg.line(start=(x, 0), end=(x, h), stroke=grid_hex, stroke_width=0.5, opacity=0.7))
+            x += grid_step
+        # Horizontal lines
+        y = 0
+        while y <= h:
+            dwg.add(dwg.line(start=(0, y), end=(w, y), stroke=grid_hex, stroke_width=0.5, opacity=0.7))
+            y += grid_step
+
+    # ---------------------------
+    # Add CENTERLINES
+    # ---------------------------
+    for cnt in contours:
+        pts = [(float(c[1]), float(c[0])) for c in cnt]
+        if args.centerline_simplify > 0:
+            epsilon = float(args.centerline_simplify)
+            approx = cv2.approxPolyDP(np.array(pts, dtype=np.float32), epsilon, False)
+            pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
+        dwg.add(dwg.polyline(points=pts, fill="none", stroke="black", stroke_width=0.1))
+
+    # Save SVG
+    dwg.save()
+    print(f"✅ Centerline SVG with grid saved: {args.centerline_output} (blur={args.centerline_blur}, simplify={args.centerline_simplify}, grid_step={grid_step})")
+
+    # Optional vpype post-processing if installed
+    try:
+        import subprocess
+        subprocess.run(
+            ["vpype", "read", args.centerline_output, "linemerge", "linesimplify", "-t", "0.3", "reloop", "write", args.centerline_output],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        print("✅ vpype optimization applied.")
+    except Exception:
+        print("ℹ️  vpype not available — saved raw SVG instead.")
+
+
+
 # ---------------------------
 # Main CLI
 # ---------------------------
 
-# Add this near the other imports
-from types import SimpleNamespace
 
 # --- NEW: central config with previous CLI defaults ---
 DEFAULT_CONFIG = {
@@ -1093,7 +1166,7 @@ DEFAULT_CONFIG = {
     "mix_model": "km",                             # {"linear","lab","subtractive","km"}
     "frame_mode": "combined",                      # {"classic","value5","both","combined"}
     "wrap": 55,
-    "grid_step": 400,
+    "grid_step": 250,
     "edge_percentile": 90.0,
     "hide_components": False,
     "per_color_frames": True,
@@ -1104,12 +1177,19 @@ DEFAULT_CONFIG = {
     "min_region_pct": 0.0,
     "outline_mode": "image",                       # {"image","labels","both"}
     "sketch_style": None,                          # {"old","new","both"}; if set, overrides outline_mode
-    "label_regions": False,
     "apply_clean_stencil": True,
     "stencil_brightness": 1.0,                     # sliders 0..1 (mapped internally)
     "stencil_sharpness": 1.0,
     "stencil_block_size": 11,
     "stencil_C": 2,
+    # --- Centerline trace (Inkscape plotting) options ---
+    "export_centerline_svg": True,                 # Run centerline trace after PDF generation
+    "centerline_output": "centerline_output.svg",  # Output SVG filename (saved locally)
+    "centerline_blur": 1,                          # Gaussian blur amount (lower = more detail)
+    "centerline_threshold": None,                  # Manual threshold (0–255), None = use Otsu
+    "centerline_otsu": True,                       # Use Otsu automatic threshold
+    "centerline_dilate": 0,                        # Dilation iterations (connect broken lines)
+    "centerline_simplify": 0,                      # Polyline simplification epsilon (higher = smoother)
 }
 
 # ---------------------------
@@ -1307,7 +1387,6 @@ def main(config: dict | None = None):
     else:
         sketch_factor_rgb = None
 
-    centers_by_label = label_component_centers(labels_full) if args.label_regions else None
 
     # -------------------------
     # PDF assembly
@@ -1388,9 +1467,6 @@ def main(config: dict | None = None):
             else:
                 composite_u8 = frame
 
-            if centers_by_label is not None:
-                composite_u8 = draw_region_numbers_rgb(composite_u8, centers_by_label, font_scale=0.45, thickness=1)
-
             frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
 
             fig = new_fig(A4_LANDSCAPE)
@@ -1437,9 +1513,6 @@ def main(config: dict | None = None):
                 else:
                     composite_u8 = frame_rgb
 
-                if centers_by_label is not None:
-                    composite_u8 = draw_region_numbers_rgb(composite_u8, centers_by_label, font_scale=0.45, thickness=1)
-
                 frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
 
                 fig = new_fig(A4_LANDSCAPE)
@@ -1467,13 +1540,19 @@ def main(config: dict | None = None):
 
         # Final page
         completed_with_grid = add_grid_to_rgb(pbn_image, grid_step=args.grid_step, grid_color=200)
-        if centers_by_label is not None:
-            completed_with_grid = draw_region_numbers_rgb(completed_with_grid, centers_by_label, font_scale=0.5, thickness=1)
         fig = new_fig(A4_LANDSCAPE); ax = fig.add_subplot(111)
         ax.imshow(completed_with_grid); ax.set_title("Completed — All Colors Applied + Grid", pad=2); ax.axis("off")
         pdf.savefig(fig, dpi=300); plt.close(fig)
 
     print(f"✅ Saved A4 landscape PDF to {args.pdf} (frame-mode={args.frame_mode}, outline={args.outline_mode})")
+
+    # --------------------------------------------------
+    # Optional: export centerline SVG for Inkscape plotting
+    # --------------------------------------------------
+    if args.export_centerline_svg:
+        # Attach stencil to args so the helper can access it
+        args.outline_gray = locals().get("outline_gray", None)
+        run_centerline_trace(args)
 
 
 if __name__ == "__main__":
