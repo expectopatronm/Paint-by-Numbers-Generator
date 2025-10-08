@@ -80,7 +80,6 @@ STRENGTH: Dict[str, float] = {
     "Burnt Sienna": 0.8,
 }
 
-
 # ---------------------------
 # Color space & conversion helpers
 # ---------------------------
@@ -193,8 +192,7 @@ def rgb_to_hsv(rgb: Sequence[int]) -> Tuple[float, float, float]:
     """Convert sRGB uint8 to (h, s, v) in [deg, 0..1, 0..1]."""
     rf, gf, bf = (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
     h, s, v = colorsys.rgb_to_hsv(rf, gf, bf)
-    return (h * 360.0, s, v)
-
+    return h * 360.0, s, v
 
 # ---------------------------
 # Hue-limited correction (warm/brown bias)
@@ -223,7 +221,6 @@ def bias_warm_browns(rgb: np.ndarray) -> np.ndarray:
             s = s * 0.97
     rf, gf, bf = colorsys.hsv_to_rgb(h / 360.0, s, v)
     return np.clip(np.array([rf, gf, bf]) * 255.0, 0, 255)
-
 
 # ---------------------------
 # Mixing models
@@ -355,7 +352,6 @@ def mix_color(parts: np.ndarray,
     else:
         return mix_linear(parts, base_rgbs)
 
-
 # ---------------------------
 # Recipe enumeration / search
 # ---------------------------
@@ -445,7 +441,6 @@ def recipe_text(entries: List[Tuple[str, int]]) -> str:
     """Human-readable recipe string, e.g. “2 parts Yellow + 1 part Black”."""
     return " + ".join([f"{p} part{'s' if p != 1 else ''} {n}" for n, p in entries]) if entries else "—"
 
-
 # ---------------------------
 # Clean-stencil helpers (adaptive threshold + light thinning + optional tone tweaks)
 # ---------------------------
@@ -490,7 +485,6 @@ def _apply_clean_stencil_rgb(image_rgb_u8: np.ndarray, *, block_size: int = 11, 
 
     result = cv2.bitwise_not(thin)
     return cv2.cvtColor(result, cv2.COLOR_GRAY2RGB)
-
 
 # ---------------------------
 # Mixing models
@@ -547,7 +541,6 @@ def mix_color(parts: np.ndarray, base_rgbs: np.ndarray, model: str) -> np.ndarra
         return mix_km_generic(parts, base_rgbs)
     else:
         return mix_linear(parts, base_rgbs)
-
 
 # ---------------------------
 # Search helpers (recipes) — variable sum(parts) and gentle regularization
@@ -646,7 +639,6 @@ def rgb_to_hsv(rgb: Sequence[int]) -> Tuple[float, float, float]:
     v = mx
     return float(h), float(s), float(v)
 
-
 # ---------------------------
 # Grouping strategies (MIXED palette) — exclusive
 # ---------------------------
@@ -702,7 +694,6 @@ def build_value_tweaks(palette: np.ndarray, recipes_text: List[str], *, threshol
                           else "Value tweak: + tiny Black" if delta < -threshold
                           else "Value tweak: none (base)")
     return tweaks
-
 
 # ---------------------------
 # Image / label utilities
@@ -787,7 +778,6 @@ def _auto_edge_mask(edge_strength_u8: np.ndarray, target_fg=0.04, min_fg=0.01, m
         elif fg > max_fg: lo = p; hi = 99.0
         else: break
     return best
-
 
 # ---------------------------
 # Pencil sketch (OLD image-edge method)
@@ -881,7 +871,6 @@ def original_edge_sketch_with_grid(img_pil: Image.Image, grid_step=80, grid_colo
     gray_with_grid = cv2.cvtColor(rgb_with_grid, cv2.COLOR_RGB2GRAY)
     return Image.fromarray(gray_with_grid, mode="L")
 
-
 # ---------------------------
 # Label-based OUTLINE + numbering (NEW)
 # ---------------------------
@@ -905,7 +894,6 @@ def add_grid_to_rgb(arr: np.ndarray, grid_step=80, grid_color=200) -> np.ndarray
         out[:, ::grid_step, :] = grid_color
         out[::grid_step, :, :] = grid_color
     return out
-
 
 # ---------------------------
 # Region cleanup
@@ -945,7 +933,6 @@ def cleanup_label_regions(labels_u8: np.ndarray, *, min_region_px: int = 0, min_
             labels[comp_mask.astype(bool)] = new_lab
 
     return labels
-
 
 # ---------------------------
 # Color key drawer
@@ -1033,7 +1020,6 @@ def draw_color_key(
     t = ax.set_title(title + " (swatch = mixed color)", pad=3)
     t.set_wrap(True)
 
-
 # ---------------------------
 # Figure helper
 # ---------------------------
@@ -1042,7 +1028,6 @@ def new_fig(size):
     fig = plt.figure(figsize=size)
     fig.subplots_adjust(left=0.02, right=0.985, bottom=0.04, top=0.965, wspace=0.02, hspace=0.02)
     return fig
-
 
 # ==============================================================
 # Centerline tracing (convert stencil to single-line SVG)
@@ -1145,52 +1130,6 @@ def run_centerline_trace(args):
         print("✅ vpype optimization applied.")
     except Exception:
         print("ℹ️  vpype not available — saved raw SVG instead.")
-
-
-
-# ---------------------------
-# Main CLI
-# ---------------------------
-
-
-# --- NEW: central config with previous CLI defaults ---
-DEFAULT_CONFIG = {
-    "input": "photo3.png",                         # was a required CLI arg; override as needed
-    "pdf": "paint_by_numbers_guide.pdf",
-    "colors": 25,
-    "resize": None,                                # e.g. (W, H)
-    "cluster_space": "lab",                        # {"lab","rgb"}
-    "palette": list(BASE_PALETTE.keys()),
-    "components": 5,
-    "max_parts": 10,
-    "mix_model": "km",                             # {"linear","lab","subtractive","km"}
-    "frame_mode": "combined",                      # {"classic","value5","both","combined"}
-    "wrap": 55,
-    "grid_step": 250,
-    "edge_percentile": 90.0,
-    "hide_components": False,
-    "per_color_frames": True,
-    "sketch_alpha": 0.55,
-    "per_color_cumulative": True,
-    "prev_alpha": 0.75,
-    "min_region_px": 0,
-    "min_region_pct": 0.0,
-    "outline_mode": "image",                       # {"image","labels","both"}
-    "sketch_style": None,                          # {"old","new","both"}; if set, overrides outline_mode
-    "apply_clean_stencil": True,
-    "stencil_brightness": 1.0,                     # sliders 0..1 (mapped internally)
-    "stencil_sharpness": 1.0,
-    "stencil_block_size": 11,
-    "stencil_C": 2,
-    # --- Centerline trace (Inkscape plotting) options ---
-    "export_centerline_svg": True,                 # Run centerline trace after PDF generation
-    "centerline_output": "centerline_output.svg",  # Output SVG filename (saved locally)
-    "centerline_blur": 1,                          # Gaussian blur amount (lower = more detail)
-    "centerline_threshold": None,                  # Manual threshold (0–255), None = use Otsu
-    "centerline_otsu": True,                       # Use Otsu automatic threshold
-    "centerline_dilate": 0,                        # Dilation iterations (connect broken lines)
-    "centerline_simplify": 0,                      # Polyline simplification epsilon (higher = smoother)
-}
 
 # ---------------------------
 # Main (DICT config, no argparse)
@@ -1387,7 +1326,6 @@ def main(config: dict | None = None):
     else:
         sketch_factor_rgb = None
 
-
     # -------------------------
     # PDF assembly
     # -------------------------
@@ -1556,4 +1494,48 @@ def main(config: dict | None = None):
 
 
 if __name__ == "__main__":
+
+    # ---------------------------
+    # Main CLI
+    # ---------------------------
+
+    # --- NEW: central config with previous CLI defaults ---
+    DEFAULT_CONFIG = {
+        "input": "photo3.png",  # was a required CLI arg; override as needed
+        "pdf": "paint_by_numbers_guide.pdf",
+        "colors": 25,
+        "resize": None,  # e.g. (W, H)
+        "cluster_space": "lab",  # {"lab","rgb"}
+        "palette": list(BASE_PALETTE.keys()),
+        "components": 5,
+        "max_parts": 10,
+        "mix_model": "km",  # {"linear","lab","subtractive","km"}
+        "frame_mode": "combined",  # {"classic","value5","both","combined"}
+        "wrap": 55,
+        "grid_step": 250,
+        "edge_percentile": 90.0,
+        "hide_components": False,
+        "per_color_frames": True,
+        "sketch_alpha": 0.55,
+        "per_color_cumulative": True,
+        "prev_alpha": 0.75,
+        "min_region_px": 0,
+        "min_region_pct": 0.0,
+        "outline_mode": "image",  # {"image","labels","both"}
+        "sketch_style": None,  # {"old","new","both"}; if set, overrides outline_mode
+        "apply_clean_stencil": True,
+        "stencil_brightness": 1.0,  # sliders 0..1 (mapped internally)
+        "stencil_sharpness": 1.0,
+        "stencil_block_size": 11,
+        "stencil_C": 2,
+        # --- Centerline trace (Inkscape plotting) options ---
+        "export_centerline_svg": True,  # Run centerline trace after PDF generation
+        "centerline_output": "centerline_output.svg",  # Output SVG filename (saved locally)
+        "centerline_blur": 1,  # Gaussian blur amount (lower = more detail)
+        "centerline_threshold": None,  # Manual threshold (0–255), None = use Otsu
+        "centerline_otsu": True,  # Use Otsu automatic threshold
+        "centerline_dilate": 0,  # Dilation iterations (connect broken lines)
+        "centerline_simplify": 0,  # Polyline simplification epsilon (higher = smoother)
+    }
+
     main()
