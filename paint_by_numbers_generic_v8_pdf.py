@@ -47,38 +47,6 @@ import svgwrite
 from skimage.morphology import skeletonize
 from skimage import measure
 
-# ---------------------------
-# Base tube pigment palette
-# ---------------------------
-
-BASE_PALETTE: Dict[str, Tuple[int, int, int]] = {
-    "Titanium White": (218, 220, 224),
-    "Lemon Yellow": (232, 206, 6),
-    "Vermillion Red": (231, 44, 75),
-    "Carmine": (213, 14, 33),
-    "Ultramarine": (39, 51, 115),
-    "Pthalo Green": (4, 95, 94),
-    "Yellow Ochre": (200, 143, 16),
-    "Lamp Black": (24, 14, 19),
-    "Burnt Umber": (42, 17, 12),
-    "Burnt Sienna": (80, 36, 25),
-}
-
-# Tinting strength multipliers: how strongly each pigment “tints” per unit part.
-# Values above 1.0 mean “stronger than average”; less than 1.0 means “weaker”.
-# You will need to calibrate these by observing real mixtures.
-STRENGTH: Dict[str, float] = {
-    "Titanium White": 1.0,
-    "Lemon Yellow": 0.9,
-    "Vermillion Red": 1.1,
-    "Carmine": 1.2,
-    "Ultramarine": 1.0,
-    "Pthalo Green": 2.0,  # Phthalo Green often has high tinting strength
-    "Yellow Ochre": 0.7,
-    "Lamp Black": 2.5,  # Black often dominates strongly
-    "Burnt Umber": 1.0,
-    "Burnt Sienna": 0.8,
-}
 
 # ---------------------------
 # Color space & conversion helpers
@@ -1494,6 +1462,38 @@ def main(config: dict | None = None):
 
 
 if __name__ == "__main__":
+    # ---------------------------
+    # Base tube pigment palette
+    # ---------------------------
+
+    BASE_PALETTE: Dict[str, Tuple[int, int, int]] = {
+        "Titanium White": (218, 220, 224),
+        "Lemon Yellow": (232, 206, 6),
+        "Vermillion Red": (231, 44, 75),
+        "Carmine": (213, 14, 33),
+        "Ultramarine": (39, 51, 115),
+        "Pthalo Green": (4, 95, 94),
+        "Yellow Ochre": (200, 143, 16),
+        "Lamp Black": (24, 14, 19),
+        "Burnt Umber": (42, 17, 12),
+        "Burnt Sienna": (80, 36, 25),
+    }
+
+    # Tinting strength multipliers: how strongly each pigment “tints” per unit part.
+    # Values above 1.0 mean “stronger than average”; less than 1.0 means “weaker”.
+    # You will need to calibrate these by observing real mixtures.
+    STRENGTH: Dict[str, float] = {
+        "Titanium White": 1.0,
+        "Lemon Yellow": 0.9,
+        "Vermillion Red": 1.1,
+        "Carmine": 1.2,
+        "Ultramarine": 1.0,
+        "Pthalo Green": 2.0,  # Phthalo Green often has high tinting strength
+        "Yellow Ochre": 0.7,
+        "Lamp Black": 2.5,  # Black often dominates strongly
+        "Burnt Umber": 1.0,
+        "Burnt Sienna": 0.8,
+    }
 
     # ---------------------------
     # Main CLI
