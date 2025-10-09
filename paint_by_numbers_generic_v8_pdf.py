@@ -1392,26 +1392,50 @@ def main(config: dict | None = None):
                            approx_palette=approx_uint8)
             pdf.savefig(fig, dpi=300); plt.close(fig)
 
-        # Per-color pages (optional)
+        # -------------------------
+        # Per-color pages (ordered to match Step sequence, big areas first within each step)
+        # -------------------------
         if args.per_color_frames:
+            # Ensure we have the multiply-underlay factor if an outline exists
             a = float(np.clip(args.sketch_alpha, 0.0, 1.0))
             if sketch_factor_rgb is None and outline_gray is not None:
                 s = np.clip(outline_gray.astype(np.float32) / 255.0, 0.0, 1.0)
                 sketch_factor_rgb = ((1.0 - a) + a * s)[..., None]
 
-            H, W = labels_full.shape; prev_mask = np.zeros((H, W), dtype=bool)
+            # Compute per-color pixel areas so we can sort large shapes first
+            H, W = labels_full.shape
+            area = np.array([(labels_full == i).sum() for i in range(args.colors)], dtype=np.int64)
+
+            # Build the per-color order from frames_to_emit (Step pages) and sort within each step by area ↓
+            per_color_order = []
+            for _title, idxs, _frame in frames_to_emit:
+                for idx in sorted(idxs, key=lambda i: -int(area[i])):
+                    if idx not in per_color_order:
+                        per_color_order.append(idx)
+
+            # Fallback: append any colors that didn't appear in the step frames (should be rare)
             for i in range(args.colors):
+                if i not in per_color_order:
+                    per_color_order.append(i)
+
+            # Render the per-color pages in the computed order
+            prev_mask = np.zeros((H, W), dtype=bool)
+            for i in per_color_order:
                 curr_mask = (labels_full == i)
                 frame_rgb = np.full_like(pbn_image, 255, dtype=np.uint8)
 
+                # Optional cumulative display of previously painted regions
                 if args.per_color_cumulative and args.prev_alpha > 0 and prev_mask.any():
-                    sel_prev = prev_mask; white_f = 255.0
+                    sel_prev = prev_mask
+                    white_f = 255.0
                     prev_blend = ((1.0 - args.prev_alpha) * white_f +
                                   args.prev_alpha * pbn_image[sel_prev].astype(np.float32)).round().astype(np.uint8)
                     frame_rgb[sel_prev] = prev_blend
 
+                # Current color regions
                 frame_rgb[curr_mask] = pbn_image[curr_mask]
 
+                # Multiply blend with outline (if present)
                 if sketch_factor_rgb is not None:
                     frame_f = np.clip(frame_rgb.astype(np.float32) / 255.0, 0.0, 1.0)
                     composite = np.clip(frame_f * sketch_factor_rgb, 0.0, 1.0)
@@ -1419,11 +1443,14 @@ def main(config: dict | None = None):
                 else:
                     composite_u8 = frame_rgb
 
+                # Grid overlay
                 frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
 
+                # Page layout
                 fig = new_fig(A4_LANDSCAPE)
                 gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
-                axL = fig.add_subplot(gs[0, 0]); axR = fig.add_subplot(gs[0, 1])
+                axL = fig.add_subplot(gs[0, 0]);
+                axR = fig.add_subplot(gs[0, 1])
 
                 axL.imshow(frame_with_grid)
                 axL.set_title((f"Per-Color • #{i + 1} + Grid "
@@ -1431,18 +1458,26 @@ def main(config: dict | None = None):
                                f"{'(outline multiply underlay)' if sketch_factor_rgb is not None else ''}"), pad=2)
                 axL.axis("off")
 
-                draw_color_key(axR, centroids, all_recipes, all_entries, BASE_PALETTE,
-                               used_indices=[i],
-                               title=f"Color Key • Color #{i + 1}",
-                               tweaks=tweaks,
-                               wrap_width=max(30, int(args.wrap * 0.7)),
-                               show_components=not args.hide_components,
-                               deltaEs=deltaEs, left_pad=1.25, right_margin=0.18, text_gap=0.05,
-                               approx_palette=approx_uint8)
-                pdf.savefig(fig, dpi=300); plt.close(fig)
+                draw_color_key(
+                    axR, centroids, all_recipes, all_entries, BASE_PALETTE,
+                    used_indices=[i],
+                    title=f"Color Key • Color #{i + 1}",
+                    tweaks=tweaks,
+                    wrap_width=max(30, int(args.wrap * 0.7)),
+                    show_components=not args.hide_components,
+                    deltaEs=deltaEs,
+                    left_pad=1.25, right_margin=0.18, text_gap=0.05,
+                    approx_palette=approx_uint8
+                )
 
-                if args.per_color_cumulative: prev_mask |= curr_mask
-                else: prev_mask[:] = False
+                pdf.savefig(fig, dpi=300)
+                plt.close(fig)
+
+                # Update cumulative mask
+                if args.per_color_cumulative:
+                    prev_mask |= curr_mask
+                else:
+                    prev_mask[:] = False
 
         # Final page
         completed_with_grid = add_grid_to_rgb(pbn_image, grid_step=args.grid_step, grid_color=200)
