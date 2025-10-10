@@ -1553,7 +1553,7 @@ if __name__ == "__main__":
         "per_color_frames": True,
         "sketch_alpha": 0.55,
         "per_color_cumulative": True,
-        "prev_alpha": 0.75,
+        "prev_alpha": 0.50,
         "min_region_px": 0,
         "min_region_pct": 0.0,
         "outline_mode": "image",  # {"image","labels","both"}
