@@ -1099,6 +1099,16 @@ def run_centerline_trace(args):
     except Exception:
         print("ℹ️  vpype not available — saved raw SVG instead.")
 
+
+def _auto_grid_step(img_width: int, min_cols: int) -> int:
+    """
+    Choose a pixel step so that floor(img_width / step) >= min_cols.
+    Using step = floor(img_width / min_cols) guarantees >= min_cols columns.
+    """
+    step = max(1, img_width // max(1, int(min_cols)))
+    return int(step)
+
+
 # ---------------------------
 # Main (DICT config, no argparse)
 # ---------------------------
@@ -1119,6 +1129,12 @@ def main(config: dict | None = None):
     # -------------------------
     img = Image.open(args.input).convert("RGB")
     orig_w, orig_h = img.size
+
+    # If grid_step is "auto" (or <=0 / None), compute from width
+    if (getattr(args, "grid_step", None) in (None, "auto")) or (
+            isinstance(args.grid_step, (int, float)) and args.grid_step <= 0):
+        args.grid_step = _auto_grid_step(orig_w, getattr(args, "grid_min_cols", 5))
+
     rgb_full = np.array(img)
     bgr_full = cv2.cvtColor(rgb_full, cv2.COLOR_RGB2BGR)
 
@@ -1501,7 +1517,8 @@ if __name__ == "__main__":
     # Base tube pigment palette
     # ---------------------------
 
-    BASE_PALETTE: Dict[str, Tuple[int, int, int]] = {
+    BASE_PALETTE = {
+        # Existing colors
         "Titanium White": (218, 220, 224),
         "Lemon Yellow": (232, 206, 6),
         "Vermillion Red": (231, 44, 75),
@@ -1510,6 +1527,16 @@ if __name__ == "__main__":
         "Pthalo Green": (4, 95, 94),
         "Yellow Ochre": (200, 143, 16),
         "Lamp Black": (24, 14, 19),
+
+        # New Schmincke Norma colors
+        # "Cobalt Blue Hue": (45, 80, 170),  # mid-value, cooler than Ultramarine
+        # "Payne's Grey": (45, 60, 80),  # deep bluish-grey
+        # "Ivory Black": (26, 23, 24),  # slightly warmer than Lamp Black
+        # "Indian Yellow": (230, 150, 20),  # transparent orange-yellow
+        "Alizarin Crimson Hue": (120, 20, 30),  # deep cool red
+        "Vandyke Brown": (45, 30, 20),  # dark warm brown
+        "Indigo": (25, 40, 70),  # deep blue with grey undertone
+        "Olive Green": (90, 100, 40),  # muted earthy green
         "Burnt Umber": (42, 17, 12),
         "Burnt Sienna": (80, 36, 25),
     }
@@ -1517,15 +1544,25 @@ if __name__ == "__main__":
     # Tinting strength multipliers: how strongly each pigment “tints” per unit part.
     # Values above 1.0 mean “stronger than average”; less than 1.0 means “weaker”.
     # You will need to calibrate these by observing real mixtures.
-    STRENGTH: Dict[str, float] = {
+    STRENGTH = {
         "Titanium White": 1.0,
         "Lemon Yellow": 0.9,
         "Vermillion Red": 1.1,
         "Carmine": 1.2,
         "Ultramarine": 1.0,
-        "Pthalo Green": 2.0,  # Phthalo Green often has high tinting strength
+        "Pthalo Green": 2.0,
         "Yellow Ochre": 0.7,
-        "Lamp Black": 2.5,  # Black often dominates strongly
+        "Lamp Black": 2.5,
+
+        # New Schmincke Norma colors
+        # "Cobalt Blue Hue": 0.9,  # moderate tinting, weaker than Phthalo
+        # "Payne's Grey": 1.5,  # quite strong because of black + blue mix
+        # "Ivory Black": 2.3,  # slightly less strong than Lamp Black
+        # "Indian Yellow": 1.2,  # transparent and strong tint
+        "Alizarin Crimson Hue": 1.3,  # deep tint, transparent
+        "Vandyke Brown": 1.0,  # moderate tinting, earthy
+        "Indigo": 1.4,  # strong tint due to dark synthetic pigments
+        "Olive Green": 1.1,  # moderate tint, earthy but fairly strong
         "Burnt Umber": 1.0,
         "Burnt Sienna": 0.8,
     }
@@ -1536,9 +1573,9 @@ if __name__ == "__main__":
 
     # --- NEW: central config with previous CLI defaults ---
     DEFAULT_CONFIG = {
-        "input": "photo3.png",  # was a required CLI arg; override as needed
+        "input": "pics/4.jpg",  # was a required CLI arg; override as needed
         "pdf": "paint_by_numbers_guide.pdf",
-        "colors": 25,
+        "colors": 20,
         "resize": None,  # e.g. (W, H)
         "cluster_space": "lab",  # {"lab","rgb"}
         "palette": list(BASE_PALETTE.keys()),
@@ -1547,7 +1584,9 @@ if __name__ == "__main__":
         "mix_model": "km",  # {"linear","lab","subtractive","km"}
         "frame_mode": "combined",  # {"classic","value5","both","combined"}
         "wrap": 55,
-        "grid_step": 250,
+        # in DEFAULT_CONFIG
+        "grid_step": "auto",  # was 250
+        "grid_min_cols": 5,  # new: minimum boxes horizontally
         "edge_percentile": 90.0,
         "hide_components": False,
         "per_color_frames": True,
