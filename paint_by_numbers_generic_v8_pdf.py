@@ -28,6 +28,8 @@ References:
 """
 
 from __future__ import annotations
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
 import itertools
 from typing import Dict, List, Sequence, Tuple
 from types import SimpleNamespace
@@ -1109,6 +1111,50 @@ def _auto_grid_step(img_width: int, min_cols: int) -> int:
     return int(step)
 
 
+# --- worker-visible placeholders; will be populated at runtime ---
+BASE_PALETTE = None
+STRENGTH = None
+
+def _init_worker(palette_dict, strength_dict):
+    """
+    Called once in each worker process to install the palette/strength
+    into module globals so functions like integer_mix_best / mix_km_strength
+    can access them without passing huge dicts each call.
+    """
+    global BASE_PALETTE, STRENGTH
+    BASE_PALETTE = palette_dict
+    STRENGTH = strength_dict
+
+
+def _recipe_worker(color_rgb_list,
+                   base_names,
+                   max_parts,
+                   max_components,
+                   model,
+                   lambda_components,
+                   lambda_parts):
+    """
+    Runs integer_mix_best for a single centroid color.
+    Kept pickle-friendly for ProcessPoolExecutor.
+    """
+    color = np.array(color_rgb_list, dtype=float)
+    entries, approx_rgb, err = integer_mix_best(
+        color,
+        base_names,
+        max_parts=max_parts,
+        max_components=max_components,
+        model=model,
+        prefer_simple_lambda_components=lambda_components,
+        prefer_simple_lambda_parts=lambda_parts,
+    )
+    # Return plain python types to be extra pickle-friendly
+    return {
+        "entries": [(str(n), int(p)) for (n, p) in entries],
+        "approx_rgb": [float(x) for x in approx_rgb],
+        "err": float(err),
+    }
+
+
 # ---------------------------
 # Main (DICT config, no argparse)
 # ---------------------------
@@ -1117,6 +1163,9 @@ def main(config: dict | None = None):
     Run the generator using a dict-based config.
     Pass only the keys you want to override; unspecified keys use DEFAULT_CONFIG.
     """
+    # make these visible to the module (parent process) for consistency
+    global BASE_PALETTE, STRENGTH
+
     cfg = {**DEFAULT_CONFIG, **(config or {})}
     args = SimpleNamespace(**cfg)
 
@@ -1184,17 +1233,66 @@ def main(config: dict | None = None):
         min_region_pct=max(0.0, float(args.min_region_pct)),
     )
 
-    # Build recipes (MIXED palette)
+    # Build recipes (MIXED palette) — parallelized
     names = args.palette
     all_entries, all_recipes, approx_rgbs, deltaEs = [], [], [], []
-    for col in centroids.astype(np.float32):
-        entries, approx_rgb, err = integer_mix_best(
-            col, names, max_parts=args.max_parts, max_components=args.components, model=args.mix_model
-        )
-        all_entries.append(entries)
-        all_recipes.append(recipe_text(entries))
-        approx_rgbs.append(np.array(approx_rgb, dtype=float))
-        deltaEs.append(err)
+
+    centroids_list = [c.astype(float).tolist() for c in centroids]
+
+    if args.parallel and len(centroids_list) > 1:
+        max_workers = int(args.workers) if args.workers else (os.cpu_count() or 1)
+        # Guard against silly over-commit (optional, but polite)
+        max_workers = max(1, min(max_workers, len(centroids_list)))
+
+        tasks = []
+        with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_init_worker,
+                initargs=(BASE_PALETTE, STRENGTH),
+        ) as ex:
+            for c in centroids_list:
+                fut = ex.submit(
+                    _recipe_worker,
+                    c,
+                    names,
+                    int(args.max_parts),
+                    int(args.components),
+                    str(args.mix_model),
+                    float(args.get("prefer_simple_lambda_components", 0.03) if isinstance(args, dict) else getattr(args, "prefer_simple_lambda_components", 0.03) if hasattr(args, "prefer_simple_lambda_components") else 0.03),
+                    float(args.get("prefer_simple_lambda_parts", 0.01) if isinstance(args, dict) else getattr(args, "prefer_simple_lambda_parts", 0.01) if hasattr(args, "prefer_simple_lambda_parts") else 0.01),
+                )
+                tasks.append(fut)
+
+            # preserve original centroid order as results return
+            results = [t.result() for t in tasks]
+
+        for res in results:
+            entries = res["entries"]
+            approx = np.array(res["approx_rgb"], dtype=float)
+            err = res["err"]
+            all_entries.append(entries)
+            all_recipes.append(recipe_text(entries))
+            approx_rgbs.append(approx)
+            deltaEs.append(err)
+    else:
+        # Fallback: single-core
+        for col in centroids.astype(np.float32):
+            entries, approx_rgb, err = integer_mix_best(
+                col,
+                names,
+                max_parts=args.max_parts,
+                max_components=args.components,
+                model=args.mix_model,
+                # If your integer_mix_best signature already includes these
+                # defaults, you can omit them:
+                # prefer_simple_lambda_components=0.03,
+                # prefer_simple_lambda_parts=0.01,
+            )
+            all_entries.append(entries)
+            all_recipes.append(recipe_text(entries))
+            approx_rgbs.append(np.array(approx_rgb, dtype=float))
+            deltaEs.append(err)
+
     approx_uint8 = np.clip(np.rint(np.array(approx_rgbs)), 0, 255).astype(np.uint8)
 
     # PBN image from MIXED palette
@@ -1513,6 +1611,7 @@ def main(config: dict | None = None):
 
 
 if __name__ == "__main__":
+
     # ---------------------------
     # Base tube pigment palette
     # ---------------------------
@@ -1566,6 +1665,8 @@ if __name__ == "__main__":
         "Burnt Umber": 1.0,
         "Burnt Sienna": 0.8,
     }
+    BASE_PALETTE = BASE_PALETTE  # assign the local dict to the module global
+    STRENGTH = STRENGTH
 
     # ---------------------------
     # Main CLI
@@ -1573,9 +1674,13 @@ if __name__ == "__main__":
 
     # --- NEW: central config with previous CLI defaults ---
     DEFAULT_CONFIG = {
+        # --- Parallelization ---
+        "parallel": True,     # turn off to force single-core
+        "workers": None,      # None = os.cpu_count(); or set an int
+
         "input": "pics/4.jpg",  # was a required CLI arg; override as needed
         "pdf": "paint_by_numbers_guide.pdf",
-        "colors": 20,
+        "colors": 25,
         "resize": None,  # e.g. (W, H)
         "cluster_space": "lab",  # {"lab","rgb"}
         "palette": list(BASE_PALETTE.keys()),
