@@ -1756,66 +1756,83 @@ def main(config: dict | None = None):
                 parent_choice=str(args.build_parent_choice),
             )
 
-            workflow_order, step_note_map, _parent_map, _extras_label = plan_build_order_configurable(
+            workflow_order, step_note_map, parent_map, _extras_label = plan_build_order_configurable(
                 parts_mat, approx_uint8, base_order, policy
             )
 
-            H, W = labels_full.shape
-            prev_mask = np.zeros((H, W), dtype=bool)
-            for rank, i in enumerate(workflow_order, start=1):
-                curr_mask = (labels_full == i)
-                frame_rgb = np.full_like(pbn_image, 255, dtype=np.uint8)
+            # --- Gate: only build workflow pages if a majority are derivable from the graph
+            total_colors = parts_mat.shape[0]
+            derivable_count = sum(1 for i in range(total_colors) if parent_map.get(i) is not None)
+            majority_ok = (derivable_count / max(1, total_colors)) >= 0.5
 
-                # Reuse the same cumulative knob for now
-                if args.per_color_cumulative and args.prev_alpha > 0 and prev_mask.any():
-                    sel_prev = prev_mask
-                    white_f = 255.0
-                    prev_blend = ((1.0 - args.prev_alpha) * white_f +
-                                  args.prev_alpha * pbn_image[sel_prev].astype(np.float32)).round().astype(np.uint8)
-                    frame_rgb[sel_prev] = prev_blend
-
-                frame_rgb[curr_mask] = pbn_image[curr_mask]
-
-                if sketch_factor_rgb is not None:
-                    frame_f = np.clip(frame_rgb.astype(np.float32) / 255.0, 0.0, 1.0)
-                    composite = np.clip(frame_f * sketch_factor_rgb, 0.0, 1.0)
-                    composite_u8 = (composite * 255.0 + 0.5).astype(np.uint8)
-                else:
-                    composite_u8 = frame_rgb
-
-                frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
-
-                fig = new_fig(A4_LANDSCAPE)
-                gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
-                axL = fig.add_subplot(gs[0, 0]);
-                axR = fig.add_subplot(gs[0, 1])
-
-                axL.imshow(frame_with_grid)
-                axL.set_title((f"Workflow • Step {rank}: Color #{i + 1} + Grid "
-                               f"{'(cumulative)' if args.per_color_cumulative else ''} "
-                               f"{'(outline multiply underlay)' if sketch_factor_rgb is not None else ''}"), pad=2)
-                axL.axis("off")
-
-                draw_color_key(
-                    axR, centroids, all_recipes, all_entries, BASE_PALETTE,
-                    used_indices=[i],
-                    title=f"Color Key • Workflow Step {rank}",
-                    tweaks=tweaks,
-                    wrap_width=max(30, int(args.wrap * 0.7)),
-                    show_components=not args.hide_components,
-                    deltaEs=deltaEs,
-                    left_pad=1.25, right_margin=0.18, text_gap=0.05,
-                    approx_palette=approx_uint8
+            if not majority_ok:
+                print(
+                    f"ℹ️  Skipping workflow pages: only {derivable_count}/{total_colors} colors "
+                    f"({100.0 * derivable_count / max(1, total_colors):.1f}%) were derivable from the graph."
                 )
-                axR.text(0.05, 0.05, step_note_map.get(i, ""), fontsize=8, transform=axR.transAxes)
+            else:
+                print(
+                    f"✅ Building workflow pages: {derivable_count}/{total_colors} colors "
+                    f"({100.0 * derivable_count / max(1, total_colors):.1f}%) are derivable."
+                )
 
-                pdf.savefig(fig, dpi=300);
-                plt.close(fig)
+                H, W = labels_full.shape
+                prev_mask = np.zeros((H, W), dtype=bool)
 
-                if args.per_color_cumulative:
-                    prev_mask |= curr_mask
-                else:
-                    prev_mask[:] = False
+                for rank, i in enumerate(workflow_order, start=1):
+                    curr_mask = (labels_full == i)
+                    frame_rgb = np.full_like(pbn_image, 255, dtype=np.uint8)
+
+                    # Reuse the same cumulative knob for now
+                    if args.per_color_cumulative and args.prev_alpha > 0 and prev_mask.any():
+                        sel_prev = prev_mask
+                        white_f = 255.0
+                        prev_blend = ((1.0 - args.prev_alpha) * white_f +
+                                      args.prev_alpha * pbn_image[sel_prev].astype(np.float32)).round().astype(np.uint8)
+                        frame_rgb[sel_prev] = prev_blend
+
+                    frame_rgb[curr_mask] = pbn_image[curr_mask]
+
+                    if sketch_factor_rgb is not None:
+                        frame_f = np.clip(frame_rgb.astype(np.float32) / 255.0, 0.0, 1.0)
+                        composite = np.clip(frame_f * sketch_factor_rgb, 0.0, 1.0)
+                        composite_u8 = (composite * 255.0 + 0.5).astype(np.uint8)
+                    else:
+                        composite_u8 = frame_rgb
+
+                    frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
+
+                    fig = new_fig(A4_LANDSCAPE)
+                    gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
+                    axL = fig.add_subplot(gs[0, 0]);
+                    axR = fig.add_subplot(gs[0, 1])
+
+                    axL.imshow(frame_with_grid)
+                    axL.set_title((f"Workflow • Step {rank}: Color #{i + 1} + Grid "
+                                   f"{'(cumulative)' if args.per_color_cumulative else ''} "
+                                   f"{'(outline multiply underlay)' if sketch_factor_rgb is not None else ''}"), pad=2)
+                    axL.axis("off")
+
+                    draw_color_key(
+                        axR, centroids, all_recipes, all_entries, BASE_PALETTE,
+                        used_indices=[i],
+                        title=f"Color Key • Workflow Step {rank}",
+                        tweaks=tweaks,
+                        wrap_width=max(30, int(args.wrap * 0.7)),
+                        show_components=not args.hide_components,
+                        deltaEs=deltaEs,
+                        left_pad=1.25, right_margin=0.18, text_gap=0.05,
+                        approx_palette=approx_uint8
+                    )
+                    axR.text(0.05, 0.05, step_note_map.get(i, ""), fontsize=8, transform=axR.transAxes)
+
+                    pdf.savefig(fig, dpi=300);
+                    plt.close(fig)
+
+                    if args.per_color_cumulative:
+                        prev_mask |= curr_mask
+                    else:
+                        prev_mask[:] = False
 
         # Final page
         completed_with_grid = add_grid_to_rgb(pbn_image, grid_step=args.grid_step, grid_color=200)
