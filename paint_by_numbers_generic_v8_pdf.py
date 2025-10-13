@@ -28,11 +28,12 @@ References:
 """
 
 from __future__ import annotations
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 import os
 import itertools
 from typing import Dict, List, Sequence, Tuple
 from types import SimpleNamespace
+from functools import lru_cache
 
 import numpy as np
 import cv2
@@ -48,6 +49,208 @@ import colorsys
 import svgwrite
 from skimage.morphology import skeletonize
 from skimage import measure
+
+from dataclasses import dataclass
+
+def _entries_to_vec(entries: List[Tuple[str,int]], base_order: List[str]) -> np.ndarray:
+    v = np.zeros(len(base_order), dtype=int)
+    for n, p in entries:
+        v[base_order.index(n)] = int(p)
+    return v
+
+def _dominates(a: np.ndarray, b: np.ndarray) -> bool:
+    return np.all(b >= a) and np.any(b > a)
+
+def _extras(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    return np.clip(b - a, 0, None)
+
+@dataclass
+class BuildPolicy:
+    max_deltaE: float = 8.0
+    max_added_parts: int = 6
+    max_added_pigments: int = 2
+    max_new_pigments: int = 1
+    min_added_fraction: float = 0.05
+    max_chain_depth: int = 4
+    parent_choice: str = "min_added_parts"   # "min_deltaE" | "min_new_pigments" | "min_added_parts"
+
+def plan_build_order_configurable(parts_mat: np.ndarray,
+                                  approx_rgb_uint8: np.ndarray,
+                                  base_order: List[str],
+                                  policy: BuildPolicy):
+    """
+    Neutral build-on planner. Returns:
+      order, step_note, parent_map, extras_label
+    """
+    C, _ = parts_mat.shape
+    totals = parts_mat.sum(axis=1)
+
+    candidates = {i: [] for i in range(C)}
+    for p in range(C):
+        for c in range(C):
+            if p == c:
+                continue
+            a, b = parts_mat[p], parts_mat[c]
+            if not _dominates(a, b):
+                continue
+            dE = deltaE_lab(approx_rgb_uint8[p], approx_rgb_uint8[c])
+            if dE > policy.max_deltaE:
+                continue
+            e = _extras(a, b)
+            total_added = int(e.sum())
+            if total_added > policy.max_added_parts:
+                continue
+            idxs = np.nonzero(e)[0].tolist()
+            added_pigs = len(idxs)
+            if added_pigs > policy.max_added_pigments:
+                continue
+            parent_support = set(np.nonzero(a)[0].tolist())
+            new_pigs = len([i for i in idxs if i not in parent_support])
+            if new_pigs > policy.max_new_pigments:
+                continue
+            if totals[p] > 0 and (total_added / max(1, totals[p])) < policy.min_added_fraction:
+                continue
+
+            if policy.parent_choice == "min_deltaE":
+                score = (dE, total_added, added_pigs, new_pigs)
+            elif policy.parent_choice == "min_new_pigments":
+                score = (new_pigs, added_pigs, total_added, dE)
+            else:
+                score = (total_added, added_pigs, dE, new_pigs)
+
+            label = " + ".join([f"{int(e[i])}× {base_order[i]}" for i in idxs])
+            candidates[c].append((score, p, label))
+
+    parent = {i: None for i in range(C)}
+    extras_label = {i: "" for i in range(C)}
+    for c in range(C):
+        if candidates[c]:
+            candidates[c].sort(key=lambda t: t[0])
+            _, p, label = candidates[c][0]
+            parent[c] = p
+            extras_label[c] = label
+
+    # chain depth
+    depth = {i: 0 for i in range(C)}
+    def _depth(i):
+        if parent[i] is None: return 0
+        if depth[i] != 0: return depth[i]
+        d = 1 + _depth(parent[i]); depth[i] = d; return d
+    for i in range(C): _depth(i)
+    for i in range(C):
+        if depth[i] > policy.max_chain_depth:
+            parent[i] = None
+            extras_label[i] = ""
+
+    # children buckets
+    children = {i: [] for i in range(C)}
+    for c, p in parent.items():
+        if p is not None: children[p].append(c)
+    for p in children:
+        children[p].sort(key=lambda c: (parts_mat[c].sum() - parts_mat[p].sum()))
+
+    bases = [i for i in range(C) if parent[i] is None]
+    bases.sort(key=lambda i: -int(totals[i]))
+
+    order = []
+    step_note = {}
+    q = bases[:]
+    while q:
+        i = q.pop(0)
+        order.append(i)
+        if parent[i] is None:
+            step_note[i] = f"Base mix for color #{i+1}"
+        else:
+            step_note[i] = f"Color #{i+1} = Color #{parent[i]+1} + {extras_label[i]}"
+        q.extend(children[i])
+
+    return order, step_note, parent, extras_label
+
+
+def _levels_from_parents(parent: dict[int, int|None]) -> dict[int,int]:
+    lvl = {}
+    def rec(i):
+        if i in lvl: return lvl[i]
+        p = parent.get(i, None)
+        lvl[i] = 0 if p is None else 1 + rec(p)
+        return lvl[i]
+    for i in parent.keys():
+        rec(i)
+    return lvl
+
+def draw_build_graph_page(approx_rgb_uint8: np.ndarray,
+                          parent: dict[int, int|None],
+                          extras_label: dict[int,str],
+                          *,
+                          title: str = "Build Dependency Graph (Neutral)"):
+    fig = plt.figure(figsize=(11.69, 8.27))  # A4 landscape
+    ax = fig.add_subplot(111)
+    ax.set_title(title, pad=8, fontsize=12)
+    ax.axis("off")
+
+    levels = _levels_from_parents(parent)
+    max_level = max(levels.values()) if levels else 0
+
+    by_level = {}
+    for i, lv in levels.items():
+        by_level.setdefault(lv, []).append(i)
+    for lv in by_level:
+        by_level[lv].sort()
+
+    pos = {}
+    for lv in range(max_level + 1):
+        nodes = by_level.get(lv, [])
+        n = max(1, len(nodes))
+        xs = np.linspace(0.12, 0.88, n)
+        y = 0.88 - lv * (0.75 / max(1, max_level))
+        for k, i in enumerate(nodes):
+            pos[i] = (xs[k], y)
+
+    # edges
+    for c, p in parent.items():
+        if p is None: continue
+        x0, y0 = pos[p]; x1, y1 = pos[c]
+        ax.annotate("", xy=(x1, y1-0.02), xytext=(x0, y0+0.02),
+                    arrowprops=dict(arrowstyle="->", lw=0.8, alpha=0.85))
+        xm, ym = (x0 + x1)/2, (y0 + y1)/2
+        if extras_label.get(c):
+            ax.text(xm, ym, extras_label[c], fontsize=6, ha="center", va="center", color="dimgray")
+
+    # nodes
+    for i, (x, y) in pos.items():
+        rgb = (approx_rgb_uint8[i] / 255.0).tolist()
+        circ = plt.Circle((x, y), 0.03, color=rgb, ec="black", lw=0.6)
+        ax.add_patch(circ)
+        ax.text(x, y + 0.055, f"{i+1}", ha="center", va="center", fontsize=8, fontweight="bold")
+
+    ax.text(0.015, 0.03, "Arrow: add parts to reach child • Edge label: parts× pigment",
+            fontsize=8, ha="left", va="bottom", transform=ax.transAxes)
+    return fig
+
+
+def _combo_key(combo_names: Sequence[str]) -> Tuple[str, ...]:
+    return tuple(combo_names)
+
+@lru_cache(maxsize=100_000)
+def _cached_mix_color(model: str,
+                      combo_key: Tuple[str, ...],
+                      parts_tuple: Tuple[int, ...],
+                      use_tinting_strength: bool) -> Tuple[float, float, float]:
+    """
+    Exact memoization for mixing. Cache key includes whether tinting strength is used.
+    """
+    base_rgbs = np.array([BASE_PALETTE[n] for n in combo_key], dtype=float)
+    parts_arr = np.array(parts_tuple, dtype=float)
+
+    if model == "km":
+        if use_tinting_strength:
+            rgb = mix_km_strength(parts_arr, base_rgbs, combo_key)
+        else:
+            rgb = mix_km_generic(parts_arr, base_rgbs)
+    else:
+        rgb = mix_color(parts_arr, base_rgbs, model, base_names=combo_key)
+
+    return float(rgb[0]), float(rgb[1]), float(rgb[2])
 
 
 # ---------------------------
@@ -352,25 +555,73 @@ def integer_mix_best(
         model: str = "km",
         prefer_simple_lambda_components: float = 0.03,
         prefer_simple_lambda_parts: float = 0.01,
+        use_tinting_strength: bool = True,   # <--- add this
 ) -> Tuple[List[Tuple[str, int]], np.ndarray, float]:
+
     """
-    Brute-force search for integer “parts” recipes approximating target_rgb, using ≤ max_parts.
-    Score = ΔE + penalties for complexity.
+    Search for a small-integer “parts” recipe that approximates a target color using
+    a subset of the given base pigments. The search enumerates all pigment
+    combinations of size 1..max_components and all non-negative integer part
+    allocations whose sum ≤ max_parts (excluding the all-zero vector).
 
-    Args:
-      target_rgb: desired color (float or int RGB).
-      base_names: full list of base pigment names.
-      max_parts, max_components: search limits.
-      model: mixing model name (“km”, “linear”, “lab”, “subtractive”).
-      prefer_simple_lambda_*: regularization strength.
+    Scoring
+    -------
+    score = ΔE*ab(mix, target)
+            + λ_components * (num_components - 1)
+            + λ_parts * (sum(parts) / max_parts)
 
-    Returns:
-      entries: list of (pigment_name, part_count)
-      best_rgb: predicted mixed color
-      best_err: ΔE error
+    Mixing models
+    -------------
+    model="km" uses the strength-aware hybrid KM if use_tinting_strength=True;
+    otherwise falls back to a generic KM (no tinting multipliers).
+     Other options ("linear", "lab", "subtractive") dispatch to their respective mixers.
+
+    Caching
+    -------
+    Calls to the mixer are memoized via `_cached_mix_color(model, combo_names, parts)`
+    so repeated (combo, parts) during the brute-force search do not recompute.
+    The cache key is independent of `target_rgb`. Each process has its own cache.
+
+    Parameters
+    ----------
+    target_rgb : Sequence[float]
+        Target color in sRGB 0..255.
+    base_names : Sequence[str]
+        Names of the available base pigments (order defines the parts vector
+        alignment). Must match keys in `BASE_PALETTE` (and optionally `STRENGTH`).
+    max_parts : int, default 10
+        Maximum allowed sum(parts) for any candidate recipe.
+    max_components : int, default 3
+        Maximum number of distinct pigments allowed in a recipe.
+    model : {"km","linear","lab","subtractive"}, default "km"
+        Mixing model to use (see above).
+    prefer_simple_lambda_components : float, default 0.03
+        Regularization weight penalizing more components.
+    prefer_simple_lambda_parts : float, default 0.01
+        Regularization weight penalizing larger total parts.
+
+    Returns
+    -------
+    entries : List[Tuple[str, int]]
+        The best recipe as (pigment_name, part_count) with zero-parts removed.
+        Single-pigment results are normalized to at least 1 part.
+    best_rgb : np.ndarray, shape (3,)
+        The predicted mixed sRGB (0..255 floats) for the best recipe.
+    best_err : float
+        ΔE*ab between `best_rgb` and `target_rgb`.
+
+    Notes
+    -----
+    - Relies on module-level `BASE_PALETTE` (sRGB for each pigment) and, for
+      model="km", `STRENGTH` (tinting multipliers). Missing strengths default to 1.0.
+    - The hybrid KM model is not strictly associative; “build-on-it” physical
+      workflows are encouraged for painting, but the search always mixes from base
+      pigments to keep predictions consistent.
+    - Complexity: O(Σ_{m=1..max_components} C(N, m) * P(m, max_parts)), where
+      P enumerates integer partitions with sum ≤ max_parts. The LRU cache reduces
+      constant factors substantially in practice.
     """
     N = len(base_names)
-    base_rgbs_full = np.array([BASE_PALETTE[n] for n in base_names], dtype=float)
     target = np.array(target_rgb, dtype=float)
 
     best_score = float("inf")
@@ -383,13 +634,20 @@ def integer_mix_best(
     for m in range(1, max_components + 1):
         for combo in itertools.combinations(range(N), m):
             combo_names = [base_names[i] for i in combo]
-            combo_rgbs = base_rgbs_full[list(combo)]
             for parts in enumerate_partitions_upto(max_parts, m):
                 s = sum(parts)
                 if s == 0:
                     continue
                 parts_arr = np.array(parts, dtype=float)
-                mix_rgb = mix_color(parts_arr, combo_rgbs, model, combo_names)
+                mix_rgb = np.array(
+                    _cached_mix_color(
+                        model,
+                        _combo_key(combo_names),
+                        tuple(int(x) for x in parts_arr),
+                        bool(use_tinting_strength),
+                    ),
+                    dtype=float
+                )
                 err = deltaE_lab(mix_rgb, target)
                 score = (err
                          + prefer_simple_lambda_components * (m - 1)
@@ -455,159 +713,6 @@ def _apply_clean_stencil_rgb(image_rgb_u8: np.ndarray, *, block_size: int = 11, 
 
     result = cv2.bitwise_not(thin)
     return cv2.cvtColor(result, cv2.COLOR_GRAY2RGB)
-
-# ---------------------------
-# Mixing models
-# ---------------------------
-
-def mix_linear(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
-    """Linear-light additive mix (approximate for light, less for paint)."""
-    w = parts / np.sum(parts)
-    lin = np.sum(srgb_to_linear_arr((base_rgbs / 255.0).T) * w, axis=1)
-    return np.clip(255 * linear_to_srgb_arr(lin), 0, 255)
-
-
-def mix_lab(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
-    """Average in Lab space (often naive for real paint, but perceptual)."""
-    w = parts / np.sum(parts)
-    labs = np.array([rgb8_to_lab(c) for c in base_rgbs], dtype=np.float32)
-    lab = np.sum(labs.T * w, axis=1)
-    return np.clip(lab_to_rgb8(lab), 0, 255)
-
-
-def mix_subtractive(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
-    """Simple subtractive-like (1 - Π(1 - c)^w) heuristic in RGB."""
-    w = parts / np.sum(parts)
-    c = (base_rgbs / 255.0)
-    res = 1.0 - np.prod((1.0 - c) ** w[:, None], axis=0)
-    return np.clip(res * 255.0, 0, 255)
-
-
-def mix_km_generic(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
-    """
-    Heuristic “KM-like” mixing via Beer–Lambert per-channel.
-
-    True Kubelka–Munk requires pigment optical data. This expedient:
-      R_mix = exp( -Σ w_i * A_i ),  A_i = -ln(R_i)
-    with R_i as sRGB channel reflectances (0..1).
-    """
-    w = parts / np.sum(parts)
-    R = np.clip(base_rgbs / 255.0, 1e-4, 1.0)
-    A = -np.log(R)
-    A_mix = np.sum(A.T * w, axis=1)
-    R_mix = np.exp(-A_mix)
-    return np.clip(R_mix * 255.0, 0, 255)
-
-
-def mix_color(parts: np.ndarray, base_rgbs: np.ndarray, model: str) -> np.ndarray:
-    """Dispatch to the requested mixing model."""
-    if model == "linear":
-        return mix_linear(parts, base_rgbs)
-    elif model == "lab":
-        return mix_lab(parts, base_rgbs)
-    elif model == "subtractive":
-        return mix_subtractive(parts, base_rgbs)
-    elif model == "km":
-        return mix_km_generic(parts, base_rgbs)
-    else:
-        return mix_linear(parts, base_rgbs)
-
-# ---------------------------
-# Search helpers (recipes) — variable sum(parts) and gentle regularization
-# ---------------------------
-
-def enumerate_partitions_upto(total: int, k: int):
-    """Yield k-tuples of nonnegative integers with sum <= total and not all zeros."""
-    if k == 1:
-        for t in range(total + 1):
-            if t > 0:
-                yield (t,)
-        return
-    for i in range(total + 1):
-        for rest in enumerate_partitions_upto(total - i, k - 1):
-            s = (i,) + rest
-            if any(p > 0 for p in s):
-                yield s
-
-
-def integer_mix_best(
-    target_rgb: Sequence[float],
-    base_names: Sequence[str],
-    *,
-    max_parts: int = 10,
-    max_components: int = 3,
-    model: str = "km",
-    prefer_simple_lambda_components: float = 0.03,
-    prefer_simple_lambda_parts: float = 0.01,
-) -> Tuple[List[Tuple[str, int]], np.ndarray, float]:
-    """
-    Brute-force an integer-part recipe approximating target_rgb using up to
-    `max_components` base colors and **sum(parts) <= max_parts**.
-
-    score = ΔE*ab(mix, target) +
-            λc * (num_components - 1) +
-            λp * (sum(parts) / max_parts)
-
-    Returns:
-        (entries, best_rgb, best_deltaE)
-    """
-    base_rgbs_full = np.array([BASE_PALETTE[n] for n in base_names], dtype=float)
-    target = np.array(target_rgb, dtype=float)
-
-    best_score = float("inf")
-    best_err = float("inf")
-    best_entries: List[Tuple[str, int]] = []
-    best_rgb = target
-
-    N = len(base_names)
-    max_components = max(1, min(max_components, N, (max_parts if max_parts > 0 else 1)))
-
-    for m in range(1, max_components + 1):
-        for combo in itertools.combinations(range(N), m):
-            base_rgbs = base_rgbs_full[list(combo)]
-            for parts in enumerate_partitions_upto(max_parts, m):
-                s = sum(parts)
-                if s == 0:
-                    continue
-                parts_arr = np.array(parts, dtype=float)
-                mix_rgb = mix_color(parts_arr, base_rgbs, model)
-                err = deltaE_lab(mix_rgb, target)
-                score = (err
-                         + prefer_simple_lambda_components * (m - 1)
-                         + prefer_simple_lambda_parts * (s / float(max_parts)))
-                if score < best_score:
-                    best_score = score
-                    best_err = err
-                    best_rgb = mix_rgb
-                    best_entries = [(base_names[i], int(p)) for i, p in zip(combo, parts) if p > 0]
-
-    if len(best_entries) == 1:
-        n, p = best_entries[0]
-        best_entries = [(n, max(1, p))]
-
-    return best_entries, best_rgb, best_err
-
-
-def recipe_text(entries: List[Tuple[str, int]]) -> str:
-    """Human-readable e.g. '2 parts Yellow + 1 part Black'."""
-    return " + ".join([f"{p} part{'s' if p != 1 else ''} {n}" for n, p in entries]) if entries else "—"
-
-
-def rgb_to_hsv(rgb: Sequence[int]) -> Tuple[float, float, float]:
-    """Return (h, s, v) with s,v ∈ [0..1]."""
-    rgb = np.array(rgb, dtype=float) / 255.0
-    mx = float(rgb.max()); mn = float(rgb.min()); diff = mx - mn
-    if diff == 0:
-        h = 0.0
-    elif mx == rgb[0]:
-        h = (60 * ((rgb[1] - rgb[2]) / diff) + 360) % 360
-    elif mx == rgb[1]:
-        h = (60 * ((rgb[2] - rgb[0]) / diff) + 120) % 360
-    else:
-        h = (60 * ((rgb[0] - rgb[1]) / diff) + 240) % 360
-    s = 0.0 if mx == 0 else diff / mx
-    v = mx
-    return float(h), float(s), float(v)
 
 # ---------------------------
 # Grouping strategies (MIXED palette) — exclusive
@@ -935,7 +1040,6 @@ def draw_color_key(
         tweaks = {i: "" for i in range(len(target_palette))}
     base_order = list(base_palette.keys())
 
-    XMAX = 16.5
     LEFT_PAD = 1.25 if left_pad is None else max(1.05, float(left_pad))
     RIGHT_MARGIN = 0.20 if right_margin is None else float(right_margin)
     swatch_w = 0.70 if swatch_w is None else float(swatch_w)
@@ -1114,16 +1218,17 @@ def _auto_grid_step(img_width: int, min_cols: int) -> int:
 # --- worker-visible placeholders; will be populated at runtime ---
 BASE_PALETTE = None
 STRENGTH = None
+USE_TINTING_STRENGTH = False  # <--- add
 
-def _init_worker(palette_dict, strength_dict):
+def _init_worker(palette_dict, strength_dict, use_tinting_strength_flag: bool):
     """
-    Called once in each worker process to install the palette/strength
-    into module globals so functions like integer_mix_best / mix_km_strength
-    can access them without passing huge dicts each call.
+    Install palette/strength in worker globals.
     """
-    global BASE_PALETTE, STRENGTH
+    global BASE_PALETTE, STRENGTH, USE_TINTING_STRENGTH
     BASE_PALETTE = palette_dict
     STRENGTH = strength_dict
+    USE_TINTING_STRENGTH = bool(use_tinting_strength_flag)
+
 
 
 def _recipe_worker(color_rgb_list,
@@ -1132,7 +1237,8 @@ def _recipe_worker(color_rgb_list,
                    max_components,
                    model,
                    lambda_components,
-                   lambda_parts):
+                   lambda_parts,
+                   use_tinting_strength_flag):   # <--- add this
     """
     Runs integer_mix_best for a single centroid color.
     Kept pickle-friendly for ProcessPoolExecutor.
@@ -1146,6 +1252,7 @@ def _recipe_worker(color_rgb_list,
         model=model,
         prefer_simple_lambda_components=lambda_components,
         prefer_simple_lambda_parts=lambda_parts,
+        use_tinting_strength=bool(use_tinting_strength_flag),   # <--- forward
     )
     # Return plain python types to be extra pickle-friendly
     return {
@@ -1164,10 +1271,13 @@ def main(config: dict | None = None):
     Pass only the keys you want to override; unspecified keys use DEFAULT_CONFIG.
     """
     # make these visible to the module (parent process) for consistency
-    global BASE_PALETTE, STRENGTH
+    global BASE_PALETTE, STRENGTH, USE_TINTING_STRENGTH
 
     cfg = {**DEFAULT_CONFIG, **(config or {})}
     args = SimpleNamespace(**cfg)
+
+    # set global toggle from config
+    USE_TINTING_STRENGTH = bool(args.use_tinting_strength)
 
     # Map the alias onto outline-mode (alias wins if provided)
     if args.sketch_style:
@@ -1248,7 +1358,7 @@ def main(config: dict | None = None):
         with ProcessPoolExecutor(
                 max_workers=max_workers,
                 initializer=_init_worker,
-                initargs=(BASE_PALETTE, STRENGTH),
+                initargs=(BASE_PALETTE, STRENGTH, bool(args.use_tinting_strength)),  # <--- add flag here
         ) as ex:
             for c in centroids_list:
                 fut = ex.submit(
@@ -1258,9 +1368,17 @@ def main(config: dict | None = None):
                     int(args.max_parts),
                     int(args.components),
                     str(args.mix_model),
-                    float(args.get("prefer_simple_lambda_components", 0.03) if isinstance(args, dict) else getattr(args, "prefer_simple_lambda_components", 0.03) if hasattr(args, "prefer_simple_lambda_components") else 0.03),
-                    float(args.get("prefer_simple_lambda_parts", 0.01) if isinstance(args, dict) else getattr(args, "prefer_simple_lambda_parts", 0.01) if hasattr(args, "prefer_simple_lambda_parts") else 0.01),
+                    float(args.get("prefer_simple_lambda_components", 0.03) if isinstance(args, dict) else getattr(args,
+                                                                                                                   "prefer_simple_lambda_components",
+                                                                                                                   0.03) if hasattr(
+                        args, "prefer_simple_lambda_components") else 0.03),
+                    float(args.get("prefer_simple_lambda_parts", 0.01) if isinstance(args, dict) else getattr(args,
+                                                                                                              "prefer_simple_lambda_parts",
+                                                                                                              0.01) if hasattr(
+                        args, "prefer_simple_lambda_parts") else 0.01),
+                    bool(args.use_tinting_strength),  # <--- add here
                 )
+
                 tasks.append(fut)
 
             # preserve original centroid order as results return
@@ -1283,6 +1401,7 @@ def main(config: dict | None = None):
                 max_parts=args.max_parts,
                 max_components=args.components,
                 model=args.mix_model,
+                use_tinting_strength=bool(args.use_tinting_strength),  # <--- add
                 # If your integer_mix_best signature already includes these
                 # defaults, you can omit them:
                 # prefer_simple_lambda_components=0.03,
@@ -1432,7 +1551,33 @@ def main(config: dict | None = None):
                        approx_palette=approx_uint8)
         pdf.savefig(fig, dpi=300); plt.close(fig)
 
-        # Page 2 (Outline page uses the same image as the underlay)
+        # ---- Optional: Build dependency graph page (neutral) ----
+        if args.build_graph_page:
+            base_order = args.palette
+            parts_mat = np.stack([_entries_to_vec(e, base_order) for e in all_entries], axis=0)
+
+            policy = BuildPolicy(
+                max_deltaE=8.0,
+                max_added_parts=6,
+                max_added_pigments=2,
+                max_new_pigments=1,
+                min_added_fraction=0.05,
+                max_chain_depth=4,
+                parent_choice="min_added_parts",
+            )
+
+            _order, _steps, parent_map, extras_label = plan_build_order_configurable(
+                parts_mat, approx_uint8, base_order, policy
+            )
+
+            fig = draw_build_graph_page(
+                approx_uint8, parent_map, extras_label,
+                title="Build Dependency Graph (Neutral, additive steps)"
+            )
+            pdf.savefig(fig, dpi=300);
+            plt.close(fig)
+
+        # Page 3 (Outline page uses the same image as the underlay)
         if outline_gray is not None:
             fig = new_fig(A4_LANDSCAPE);
             ax = fig.add_subplot(111)
@@ -1507,32 +1652,31 @@ def main(config: dict | None = None):
             pdf.savefig(fig, dpi=300); plt.close(fig)
 
         # -------------------------
-        # Per-color pages (ordered to match Step sequence, big areas first within each step)
+        # Per-color pages (original order only)
         # -------------------------
         if args.per_color_frames:
-            # Ensure we have the multiply-underlay factor if an outline exists
+            # Ensure multiply-underlay factor if outline exists
             a = float(np.clip(args.sketch_alpha, 0.0, 1.0))
             if sketch_factor_rgb is None and outline_gray is not None:
                 s = np.clip(outline_gray.astype(np.float32) / 255.0, 0.0, 1.0)
                 sketch_factor_rgb = ((1.0 - a) + a * s)[..., None]
 
-            # Compute per-color pixel areas so we can sort large shapes first
+            # Old area-based order derived from step frames (unchanged)
             H, W = labels_full.shape
             area = np.array([(labels_full == i).sum() for i in range(args.colors)], dtype=np.int64)
-
-            # Build the per-color order from frames_to_emit (Step pages) and sort within each step by area ↓
             per_color_order = []
             for _title, idxs, _frame in frames_to_emit:
                 for idx in sorted(idxs, key=lambda i: -int(area[i])):
                     if idx not in per_color_order:
                         per_color_order.append(idx)
-
-            # Fallback: append any colors that didn't appear in the step frames (should be rare)
             for i in range(args.colors):
                 if i not in per_color_order:
                     per_color_order.append(i)
 
-            # Render the per-color pages in the computed order
+            # Neutral label for right-side note (optional)
+            step_note_map = {i: f"Color #{i + 1}" for i in per_color_order}
+
+            # Render per-color pages in the decided (original) order
             prev_mask = np.zeros((H, W), dtype=bool)
             for i in per_color_order:
                 curr_mask = (labels_full == i)
@@ -1572,6 +1716,7 @@ def main(config: dict | None = None):
                                f"{'(outline multiply underlay)' if sketch_factor_rgb is not None else ''}"), pad=2)
                 axL.axis("off")
 
+                # Right side: color key & neutral note
                 draw_color_key(
                     axR, centroids, all_recipes, all_entries, BASE_PALETTE,
                     used_indices=[i],
@@ -1583,11 +1728,90 @@ def main(config: dict | None = None):
                     left_pad=1.25, right_margin=0.18, text_gap=0.05,
                     approx_palette=approx_uint8
                 )
+                axR.text(0.05, 0.05, step_note_map.get(i, ""), fontsize=8, transform=axR.transAxes)
 
-                pdf.savefig(fig, dpi=300)
+                pdf.savefig(fig, dpi=300);
                 plt.close(fig)
 
-                # Update cumulative mask
+                # Update cumulative mask for next page
+                if args.per_color_cumulative:
+                    prev_mask |= curr_mask
+                else:
+                    prev_mask[:] = False
+
+        # -------------------------
+        # Optional: Workflow sequence pages (EXTRA PAGES, does not touch per-color pages)
+        # -------------------------
+        if args.build_workflow_pages:
+            base_order = args.palette
+            parts_mat = np.stack([_entries_to_vec(e, base_order) for e in all_entries], axis=0)
+
+            policy = BuildPolicy(
+                max_deltaE=float(args.build_max_deltaE),
+                max_added_parts=int(args.build_max_added_parts),
+                max_added_pigments=int(args.build_max_added_pigments),
+                max_new_pigments=int(args.build_max_new_pigments),
+                min_added_fraction=float(args.build_min_added_fraction),
+                max_chain_depth=int(args.build_max_chain_depth),
+                parent_choice=str(args.build_parent_choice),
+            )
+
+            workflow_order, step_note_map, _parent_map, _extras_label = plan_build_order_configurable(
+                parts_mat, approx_uint8, base_order, policy
+            )
+
+            H, W = labels_full.shape
+            prev_mask = np.zeros((H, W), dtype=bool)
+            for rank, i in enumerate(workflow_order, start=1):
+                curr_mask = (labels_full == i)
+                frame_rgb = np.full_like(pbn_image, 255, dtype=np.uint8)
+
+                # Reuse the same cumulative knob for now
+                if args.per_color_cumulative and args.prev_alpha > 0 and prev_mask.any():
+                    sel_prev = prev_mask
+                    white_f = 255.0
+                    prev_blend = ((1.0 - args.prev_alpha) * white_f +
+                                  args.prev_alpha * pbn_image[sel_prev].astype(np.float32)).round().astype(np.uint8)
+                    frame_rgb[sel_prev] = prev_blend
+
+                frame_rgb[curr_mask] = pbn_image[curr_mask]
+
+                if sketch_factor_rgb is not None:
+                    frame_f = np.clip(frame_rgb.astype(np.float32) / 255.0, 0.0, 1.0)
+                    composite = np.clip(frame_f * sketch_factor_rgb, 0.0, 1.0)
+                    composite_u8 = (composite * 255.0 + 0.5).astype(np.uint8)
+                else:
+                    composite_u8 = frame_rgb
+
+                frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
+
+                fig = new_fig(A4_LANDSCAPE)
+                gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
+                axL = fig.add_subplot(gs[0, 0]);
+                axR = fig.add_subplot(gs[0, 1])
+
+                axL.imshow(frame_with_grid)
+                axL.set_title((f"Workflow • Step {rank}: Color #{i + 1} + Grid "
+                               f"{'(cumulative)' if args.per_color_cumulative else ''} "
+                               f"{'(outline multiply underlay)' if sketch_factor_rgb is not None else ''}"), pad=2)
+                axL.axis("off")
+
+                draw_color_key(
+                    axR, centroids, all_recipes, all_entries, BASE_PALETTE,
+                    used_indices=[i],
+                    title=f"Color Key • Workflow Step {rank}",
+                    tweaks=tweaks,
+                    wrap_width=max(30, int(args.wrap * 0.7)),
+                    show_components=not args.hide_components,
+                    deltaEs=deltaEs,
+                    left_pad=1.25, right_margin=0.18, text_gap=0.05,
+                    approx_palette=approx_uint8
+                )
+                axR.text(0.05, 0.05, step_note_map.get(i, ""), fontsize=8, transform=axR.transAxes)
+
+                pdf.savefig(fig, dpi=300);
+                plt.close(fig)
+
                 if args.per_color_cumulative:
                     prev_mask |= curr_mask
                 else:
@@ -1680,7 +1904,7 @@ if __name__ == "__main__":
 
         "input": "pics/4.jpg",  # was a required CLI arg; override as needed
         "pdf": "paint_by_numbers_guide.pdf",
-        "colors": 25,
+        "colors": 28,
         "resize": None,  # e.g. (W, H)
         "cluster_space": "lab",  # {"lab","rgb"}
         "palette": list(BASE_PALETTE.keys()),
@@ -1715,6 +1939,19 @@ if __name__ == "__main__":
         "centerline_otsu": True,  # Use Otsu automatic threshold
         "centerline_dilate": 0,  # Dilation iterations (connect broken lines)
         "centerline_simplify": 0,  # Polyline simplification epsilon (higher = smoother)
+        # Policy knobs (balanced defaults)
+        "build_max_deltaE": 8.0,
+        "build_max_added_parts": 6,
+        "build_max_added_pigments": 2,
+        "build_max_new_pigments": 1,
+        "build_min_added_fraction": 0.05,
+        "build_max_chain_depth": 4,
+        "build_parent_choice": "min_added_parts",  # "min_deltaE" | "min_new_pigments" | "min_added_parts"
+        # --- Mixing behavior ---
+        "use_tinting_strength": False,  # True = strength-aware KM; False = generic KM
+        # --- Build-on graph (extra page) ---
+        "build_graph_page": True,  # add a single neutral dependency-graph page
+        "build_workflow_pages": True,  # if True, also generate workflow-based per-color pages
     }
 
     main()
