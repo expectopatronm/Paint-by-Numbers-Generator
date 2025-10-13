@@ -53,9 +53,56 @@ from skimage import measure
 from dataclasses import dataclass
 
 import subprocess
-import tempfile
-import shutil
 
+try:
+    import mixbox as _mixbox  # pip install pymixbox
+    _HAS_MIXBOX = True
+except Exception:
+    _HAS_MIXBOX = False
+
+def _require_mixbox():
+    if not _HAS_MIXBOX:
+        raise RuntimeError("The 'learned' model requires 'pymixbox' (pip install pymixbox)")
+
+# Cache latents for speed
+_MIXBOX_LATENTS: dict[tuple[int,int,int], list[float]] = {}
+
+def _latent_for_rgb_u8(rgb_u8) -> list[float]:
+    key = (int(rgb_u8[0]), int(rgb_u8[1]), int(rgb_u8[2]))
+    z = _MIXBOX_LATENTS.get(key)
+    if z is None:
+        z = _mixbox.rgb_to_latent(key)  # returns list/tuple of length mixbox.LATENT_SIZE
+        _MIXBOX_LATENTS[key] = z
+    return z
+
+def mix_learned(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
+    """
+    Mix N colors exactly as documented by Mixbox:
+    - convert RGB -> latent
+    - weighted average latents
+    - latent -> RGB
+    Returns sRGB uint8 floats (0..255).
+    """
+    _require_mixbox()
+    parts = np.asarray(parts, dtype=float)
+    if parts.sum() <= 0:
+        return base_rgbs[0].astype(float)
+
+    w = parts / parts.sum()
+
+    z_mix = None
+    for wi, rgb in zip(w, base_rgbs):
+        if wi <= 0:
+            continue
+        zi = _latent_for_rgb_u8(rgb)
+        if z_mix is None:
+            z_mix = [wi * v for v in zi]
+        else:
+            for i in range(len(z_mix)):
+                z_mix[i] += wi * zi[i]
+
+    r, g, b = _mixbox.latent_to_rgb(z_mix)  # uint8s
+    return np.array([float(r), float(g), float(b)], dtype=float)
 
 def _choose_scale(longest: int, *,
                   ok_min: int,
@@ -605,6 +652,8 @@ def mix_color(parts: np.ndarray,
         return mix_subtractive(parts, base_rgbs)
     elif model == "km":
         return mix_km_strength(parts, base_rgbs, base_names)
+    elif model == "learned":                      # <--- NEW
+        return mix_learned(parts, base_rgbs)
     else:
         return mix_linear(parts, base_rgbs)
 
@@ -2019,7 +2068,7 @@ if __name__ == "__main__":
         "palette": list(BASE_PALETTE.keys()),
         "components": 5,
         "max_parts": 10,
-        "mix_model": "km",  # {"linear","lab","subtractive","km"}
+        "mix_model": "learned",  # {"linear","lab","subtractive","km","learned"}
         "frame_mode": "combined",  # {"classic","value5","both","combined"}
         "wrap": 55,
         # in DEFAULT_CONFIG
