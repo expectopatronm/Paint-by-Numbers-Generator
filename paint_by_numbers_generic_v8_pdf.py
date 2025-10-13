@@ -52,6 +52,89 @@ from skimage import measure
 
 from dataclasses import dataclass
 
+import subprocess
+import tempfile
+import shutil
+
+
+def _choose_scale(longest: int, *,
+                  ok_min: int,
+                  target: int,
+                  choices=(2, 3, 4)) -> int | None:
+    """
+    Pick the smallest scale in `choices` that brings the longest side to at least ok_min,
+    without needing to exceed `target` (we'll clamp down afterwards if we overshoot).
+    Returns None if no upscaling is needed.
+    """
+    if longest >= ok_min and longest < target:
+        return None    # already acceptable per user rule
+    if longest >= target:
+        return None    # already >= 3000 -> don't upscale
+    # Need to upscale from below ok_min
+    for s in sorted(choices):
+        if longest * s >= ok_min:
+            return s
+    return max(choices) if choices else None  # fallback
+
+
+def _maybe_upscale_with_realesrgan(input_path: str,
+                                   *,
+                                   enable: bool,
+                                   ok_min: int,
+                                   target: int,
+                                   bin_path: str,
+                                   choices=(2, 3, 4)) -> str:
+    """
+    If enabled and the longest side is < ok_min, upscale with realesrgan
+    to bring it above ok_min using the smallest scale in `choices`.
+    Does NOT clamp down if it overshoots the target.
+    """
+    if not enable:
+        return input_path
+
+    try:
+        with Image.open(input_path) as im:
+            w, h = im.size
+    except Exception as e:
+        print(f"⚠️  Could not open input for pre-check: {e}. Skipping upscale.")
+        return input_path
+
+    longest = max(w, h)
+    # If already >= ok_min, no upscale
+    if longest >= ok_min:
+        print(f"ℹ️  Upscale check: longest={longest}px ≥ {ok_min}px → no upscale.")
+        return input_path
+
+    # Pick the smallest scale that reaches ok_min
+    scale = None
+    for s in sorted(choices):
+        if longest * s >= ok_min:
+            scale = s
+            break
+    if scale is None:
+        scale = max(choices)  # fallback
+
+    root, _ = os.path.splitext(os.path.abspath(input_path))
+    up_path = f"{root}.upx{scale}.png"
+
+    cmd = [str(bin_path), "-s", str(scale), "-i", input_path, "-o", up_path]
+    try:
+        print(f"⏫ Running: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True)
+    except Exception as e:
+        print(f"⚠️  Real-ESRGAN failed ({e}). Using original image.")
+        return input_path
+
+    try:
+        with Image.open(up_path) as up:
+            uw, uh = up.size
+        print(f"✅ Upscaled to {uw}×{uh} (longest={max(uw, uh)}px).")
+    except Exception:
+        print(f"✅ Upscaled (file saved): {up_path}")
+
+    return up_path
+
+
 def _entries_to_vec(entries: List[Tuple[str,int]], base_order: List[str]) -> np.ndarray:
     v = np.zeros(len(base_order), dtype=int)
     for n, p in entries:
@@ -1270,21 +1353,30 @@ def main(config: dict | None = None):
     Run the generator using a dict-based config.
     Pass only the keys you want to override; unspecified keys use DEFAULT_CONFIG.
     """
-    # make these visible to the module (parent process) for consistency
     global BASE_PALETTE, STRENGTH, USE_TINTING_STRENGTH
 
     cfg = {**DEFAULT_CONFIG, **(config or {})}
     args = SimpleNamespace(**cfg)
 
-    # set global toggle from config
+    # --- NEW: pre-upscale gate ---
+    args.input = _maybe_upscale_with_realesrgan(
+        args.input,
+        enable=bool(getattr(args, "enable_upscale", True)),
+        ok_min=int(getattr(args, "upscale_ok_min_long", 2500)),
+        target=None,  # kept for signature compatibility, but unused
+        bin_path=str(getattr(args, "realesrgan_bin", "realesrgan-ncnn-vulkan")),
+        choices=tuple(getattr(args, "realesrgan_scale_choices", (2, 3, 4))),
+    )
+
+    # set global toggle from config (existing)
     USE_TINTING_STRENGTH = bool(args.use_tinting_strength)
 
-    # Map the alias onto outline-mode (alias wins if provided)
+    # Map the alias onto outline-mode (existing)
     if args.sketch_style:
         args.outline_mode = {"old": "image", "new": "labels", "both": "both"}[args.sketch_style]
 
     # -------------------------
-    # Load + optional resize for clustering
+    # Load + optional resize for clustering (unchanged, but now uses the possibly upscaled path)
     # -------------------------
     img = Image.open(args.input).convert("RGB")
     orig_w, orig_h = img.size
@@ -1969,6 +2061,11 @@ if __name__ == "__main__":
         # --- Build-on graph (extra page) ---
         "build_graph_page": True,  # add a single neutral dependency-graph page
         "build_workflow_pages": True,  # if True, also generate workflow-based per-color pages
+        # --- Optional pre-upscale with Real-ESRGAN ---
+        "enable_upscale": True,  # turn on/off the pre-upscale
+        "upscale_ok_min_long": 2500,  # if longest side >= this → no upscale
+        "realesrgan_bin": "realesrgan-ncnn-vulkan",  # path or command name
+        "realesrgan_scale_choices": (2, 3, 4),  # allowed scale factors
     }
 
     main()
