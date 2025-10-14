@@ -2332,7 +2332,7 @@ if __name__ == "__main__":
         "palette": list(BASE_PALETTE.keys()),
         "components": 5,
         "max_parts": 10,
-        "mix_model": "learned",  # {"linear","lab","subtractive","km","learned"}
+        "mix_model": "learned",  # {"km","learned"}
         "frame_mode": "combined",  # {"classic","value5","both","combined"}
         "wrap": 55,
         # in DEFAULT_CONFIG
