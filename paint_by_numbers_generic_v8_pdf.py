@@ -38,6 +38,7 @@ from functools import lru_cache
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
+from numpy.random import default_rng
 import cv2
 from PIL import Image, ImageEnhance
 import matplotlib.pyplot as plt
@@ -92,6 +93,236 @@ def mix_learned(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
 
     r, g, b = _mixbox.latent_to_rgb(z_mix)  # uint8s
     return np.array([float(r), float(g), float(b)], dtype=float)
+
+
+# =========================
+# PAM (CLARA-only, auto-sized)
+# =========================
+
+# --- perceptual distance helpers ---
+def _deltaE76_pairwise(X_lab, Y_lab):
+    X = np.asarray(X_lab, np.float32); Y = np.asarray(Y_lab, np.float32)
+    return np.sqrt(np.sum((X[:, None, :] - Y[None, :, :])**2, axis=2))
+
+
+def _ciede2000_to_one(X_lab, y_lab):
+    X = np.asarray(X_lab, np.float32); y = np.asarray(y_lab, np.float32)
+    L1,a1,b1 = X[:,0], X[:,1], X[:,2]
+    L2,a2,b2 = float(y[0]), float(y[1]), float(y[2])
+    C1 = np.sqrt(a1*a1 + b1*b1); C2 = np.sqrt(a2*a2 + b2*b2)
+    Cbar = 0.5*(C1 + C2); Cbar7 = Cbar**7
+    G = 0.5*(1 - np.sqrt(Cbar7 / (Cbar7 + 25**7 + 1e-12)))
+    a1p = (1+G)*a1; a2p = (1+G)*a2
+    C1p = np.sqrt(a1p*a1p + b1*b1); C2p = np.sqrt(a2p*a2p + b2*b2)
+    def _hp(ap, b):
+        ang = (np.degrees(np.arctan2(b, ap)) % 360.0)
+        return np.where((ap==0)&(b==0), 0.0, ang)
+    h1p = _hp(a1p, b1); h2p = _hp(a2p, b2)
+    dLp = L2 - L1; dCp = C2p - C1p
+    dhp = h2p - h1p
+    dhp = np.where(dhp > 180, dhp-360, dhp)
+    dhp = np.where(dhp < -180, dhp+360, dhp)
+    dhp = np.where((C1p*C2p)==0, 0.0, dhp)
+    dHp = 2*np.sqrt(C1p*C2p)*np.sin(np.radians(dhp/2))
+    Lbarp = 0.5*(L1+L2); Cbarp = 0.5*(C1p+C2p)
+    sumh = h1p + h2p; diffh = np.abs(h1p - h2p)
+    hbarp = np.where((C1p*C2p)==0, h1p+h2p,
+                     np.where(diffh <= 180, 0.5*sumh,
+                              np.where(sumh < 360, 0.5*(sumh+360), 0.5*(sumh-360))))
+    T = 1 - 0.17*np.cos(np.radians(hbarp-30)) + 0.24*np.cos(np.radians(2*hbarp)) \
+          + 0.32*np.cos(np.radians(3*hbarp+6)) - 0.20*np.cos(np.radians(4*hbarp-63))
+    dtheta = 30*np.exp(-((hbarp-275)/25)**2)
+    Rc = 2*np.sqrt((Cbarp**7) / (Cbarp**7 + 25**7 + 1e-12))
+    Sl = 1 + (0.015*(Lbarp-50)**2)/np.sqrt(20 + (Lbarp-50)**2)
+    Sc = 1 + 0.045*Cbarp
+    Sh = 1 + 0.015*Cbarp*T
+    Rt = -np.sin(np.radians(2*dtheta))*Rc
+    kl=kc=kh=1.0
+    return np.sqrt((dLp/(kl*Sl))**2 + (dCp/(kc*Sc))**2 + (dHp/(kh*Sh))**2 + Rt*(dCp/(kc*Sc))*(dHp/(kh*Sh)))
+
+
+def _deltaE00_pairwise(X_lab, Y_lab):
+    X = np.asarray(X_lab, np.float32); Y = np.asarray(Y_lab, np.float32)
+    out = np.empty((X.shape[0], Y.shape[0]), dtype=np.float32)
+    for j in range(Y.shape[0]): out[:, j] = _ciede2000_to_one(X, Y[j])
+    return out
+
+
+def _pairwise_sqdist(X, Y=None):
+    X = np.asarray(X, np.float32); Y = X if Y is None else np.asarray(Y, np.float32)
+    x2 = np.sum(X*X, axis=1)[:, None]; y2 = np.sum(Y*Y, axis=1)[None, :]
+    return x2 + y2 - 2.0*(X @ Y.T)
+
+
+# --- core PAM on a (small) sample (for CLARA) ---
+def pam_cluster_metric(feats, k, *, metric="deltaE00", max_iter=100, random_state=42):
+    rng = default_rng(random_state)
+    n = feats.shape[0]
+
+    # metric lambdas
+    if metric == "deltaE00":
+        pairwise = _deltaE00_pairwise; to_one = _ciede2000_to_one
+    elif metric == "deltaE76":
+        pairwise = _deltaE76_pairwise; to_one = lambda X,y: np.sqrt(np.sum((X-y)**2, axis=1, dtype=np.float32))
+    else:  # L2
+        pairwise = lambda X,Y: np.sqrt(np.maximum(_pairwise_sqdist(X,Y), 0.0))
+        to_one   = lambda X,y: np.sqrt(np.maximum(np.sum((X-y)**2, axis=1, dtype=np.float32), 0.0))
+
+    # k-medoids++ init
+    idx0 = int(rng.integers(0, n)); med_idx = [idx0]
+    d = to_one(feats, feats[idx0]); d = np.maximum(d, 0.0)
+    for _ in range(1, k):
+        w = d**2; probs = w / (w.sum() + 1e-12)
+        nxt = int(rng.choice(n, p=probs)); med_idx.append(nxt)
+        d = np.minimum(d, to_one(feats, feats[nxt]))
+    med_idx = np.array(med_idx, int)
+
+    # precompute distances to medoids
+    D = pairwise(feats, feats[med_idx])             # (n,k)
+    nearest_j = np.argmin(D, axis=1); nearest_d = D[np.arange(n), nearest_j]
+    D_mask = D.copy(); D_mask[np.arange(n), nearest_j] = np.inf
+    second_d = D_mask.min(axis=1); second_j = D_mask.argmin(axis=1)
+
+    prev_cost = float(nearest_d.sum())
+    for _ in range(int(max_iter)):
+        improved = False
+        non_meds = np.setdiff1d(np.arange(n), med_idx, assume_unique=True)
+        for h in non_meds:
+            dh = to_one(feats, feats[h])  # (n,)
+            best_delta_h = 0.0
+            for mpos, m in enumerate(med_idx):
+                in_m  = (nearest_j == mpos)
+                gain  = np.sum(np.minimum(dh[in_m], second_d[in_m]) - nearest_d[in_m])
+                not_m = ~in_m
+                drop  = np.sum(np.minimum(nearest_d[not_m], dh[not_m]) - nearest_d[not_m])
+                delta = gain + drop
+                if delta < best_delta_h:
+                    best_delta_h = delta
+                    best_swap = (mpos, h, dh)
+            if best_delta_h < -1e-8:
+                mpos, hidx, dh = best_swap
+                improved = True
+                med_idx[mpos] = hidx
+                D[:, mpos] = dh
+                new_nearest_j = np.argmin(D, axis=1); new_nearest_d = D[np.arange(n), new_nearest_j]
+                D_mask = D.copy(); D_mask[np.arange(n), new_nearest_j] = np.inf
+                second_d = D_mask.min(axis=1); second_j = D_mask.argmin(axis=1)
+                nearest_j, nearest_d = new_nearest_j, new_nearest_d
+        cost = float(nearest_d.sum())
+        if (not improved) or cost >= prev_cost - 1e-8: break
+        prev_cost = cost
+
+    return nearest_j.astype(np.uint8), med_idx
+
+
+# --- blockwise assignment (never allocate n×k for the full image) ---
+def _assign_blockwise(feats, medoids, metric="deltaE00", block_size=120000):
+    if metric == "deltaE00":
+        pair = _deltaE00_pairwise
+    elif metric == "deltaE76":
+        pair = _deltaE76_pairwise
+    else:
+        def pair(X,Y): return np.sqrt(np.maximum(_pairwise_sqdist(X,Y), 0.0))
+    n = feats.shape[0]; labels = np.empty(n, np.uint8)
+    for s in range(0, n, int(block_size)):
+        e = min(n, s + int(block_size))
+        D = pair(feats[s:e], medoids)
+        labels[s:e] = np.argmin(D, axis=1)
+        del D
+    return labels
+
+
+# --- tiny auto-sizer (no manual knobs) ---
+def _avail_ram_bytes_fallback():
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available)
+    except Exception:
+        return int(8e9)  # fallback 8 GB
+
+
+def _metric_cost_factor(metric: str) -> float:
+    m = (metric or "deltaE00").lower()
+    if m == "l2": return 1.0
+    if m == "deltae76": return 1.2
+    return 1.8  # ΔE00 heavier
+
+
+def _auto_pam_clara_params(n: int, k: int, *, metric="deltaE00") -> dict:
+    import math
+    n = int(max(1, n)); k = int(max(1, k))
+    f = _metric_cost_factor(metric)
+
+    # sample size: >= 300*k, grows with k and log10(n), scaled by metric cost
+    base = int(round(k * (50 + 10 * math.log10(max(10, n)))))
+    s_lo = max(300 * k, k)
+    s_hi = min(int(0.05 * n), 200_000)
+    sample_size = max(s_lo, min(int(base * f), s_hi))
+
+    # restarts: 1..5 based on n (+1 if k big)
+    if n <= 100_000:        num_samples = 1
+    elif n <= 1_000_000:    num_samples = 3
+    else:                   num_samples = 5
+    if k >= 48:             num_samples = min(5, num_samples + 1)
+
+    # validation set: 1.5× sample, min 50k, ≤ n
+    val_size = min(n, max(int(1.5 * sample_size), 50_000))
+
+    # block size for full assignment: ~15% of available RAM
+    avail = _avail_ram_bytes_fallback()
+    budget = max(256 * 1024 * 1024, int(0.15 * avail))   # ≥256MB
+    blk = int(budget // max(1, 4 * k))                   # float32
+    block_size = int(max(50_000, min(blk, 600_000)))
+
+    return {
+        "sample_size": sample_size,
+        "num_samples": num_samples,
+        "val_size": val_size,
+        "block_size": block_size,
+    }
+
+# --- CLARA wrapper: sample->PAM->validate->assign full ---
+def pam_clara(feats, pixels_rgb_u8, k, *, metric="deltaE00",
+              sample_size=80000, num_samples=3, val_size=120000,
+              block_size=120000, random_state=42, max_iter=100):
+    rng = default_rng(random_state)
+    n = feats.shape[0]
+    sample_size = min(int(sample_size), n)
+    val_size = min(int(val_size), n)
+
+    best_cost = np.inf
+    best_meds_global = None
+
+    # validation subset (once)
+    val_idx = np.sort(rng.choice(n, size=val_size, replace=False))
+    feats_val = feats[val_idx]
+
+    # distance selector for validation
+    Dv = (_deltaE00_pairwise if metric=="deltaE00"
+          else _deltaE76_pairwise if metric=="deltaE76"
+          else (lambda X,Y: np.sqrt(np.maximum(_pairwise_sqdist(X,Y), 0.0))))
+
+    for _ in range(int(num_samples)):
+        samp_idx = np.sort(rng.choice(n, size=sample_size, replace=False))
+        feats_s = feats[samp_idx]
+
+        _, med_s = pam_cluster_metric(
+            feats_s, k, metric=metric, max_iter=max_iter,
+            random_state=int(rng.integers(0, 10_000_000))
+        )
+        meds_global = samp_idx[med_s]
+
+        # validate: total nearest distance on held-out set
+        val_cost = float(np.min(Dv(feats_val, feats[meds_global]), axis=1).sum())
+        if val_cost < best_cost:
+            best_cost = val_cost
+            best_meds_global = meds_global
+
+    # final assignment over ALL points (blockwise)
+    labels = _assign_blockwise(feats, feats[best_meds_global],
+                               metric=metric, block_size=block_size)
+    return labels, best_meds_global
+
 
 def _choose_scale(longest: int, *,
                   ok_min: int,
@@ -1490,17 +1721,62 @@ def main(config: dict | None = None):
     else:
         feats = pixels_small
 
-    kmeans = KMeans(n_clusters=args.colors, random_state=42, n_init=8)
-    kmeans.fit(feats)
-    labels_small = kmeans.labels_.reshape(Hs, Ws).astype(np.uint8)
+    if args.cluster_algo == "kmeans":
+        kmeans = KMeans(n_clusters=args.colors, random_state=42, n_init=8)
+        kmeans.fit(feats)
+        labels_small = kmeans.labels_.reshape(Hs, Ws).astype(np.uint8)
 
-    # Centroids in RGB
-    if args.cluster_space == "lab":
-        centroids_lab = kmeans.cluster_centers_.astype(np.float32)
-        centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
-        centroids = np.array(centroids_rgb, dtype=np.uint8)
-    else:
-        centroids = np.clip(np.rint(kmeans.cluster_centers_), 0, 255).astype(np.uint8)
+        # Centroids in RGB
+        if args.cluster_space == "lab":
+            centroids_lab = kmeans.cluster_centers_.astype(np.float32)
+            centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
+            centroids = np.array(centroids_rgb, dtype=np.uint8)
+        else:
+            centroids = np.clip(np.rint(kmeans.cluster_centers_), 0, 255).astype(np.uint8)
+
+    elif args.cluster_algo == "pam":
+        # Use Lab features for perceptual ΔE metrics
+        if args.pam_metric in ("deltaE00", "deltaE76"):
+            if args.cluster_space != "lab":
+                print("⚠️ pam_metric is perceptual; forcing cluster_space='lab' for PAM.")
+
+            def _rgbrows_to_labrows(arr_uint8):
+                out = np.empty((arr_uint8.shape[0], 3), dtype=np.float32)
+                for i, (r, g, b) in enumerate(arr_uint8):
+                    out[i] = rgb8_to_lab(np.array([r, g, b], np.float32))
+                return out
+
+            feats = _rgbrows_to_labrows(pixels_small.astype(np.uint8))
+        else:
+            feats = pixels_small.astype(np.float32)  # L2 in RGB
+
+        n = feats.shape[0]
+        k = int(args.colors)
+
+        auto = _auto_pam_clara_params(n, k, metric=str(args.pam_metric))
+        sample_size = auto["sample_size"]
+        num_samples = auto["num_samples"]
+        val_size = auto["val_size"]
+        block_size = auto["block_size"]
+
+        print(f"ℹ️ PAM/CLARA(auto): n={n}, k={k}, metric={args.pam_metric}, "
+              f"sample={sample_size}, samples={num_samples}, val={val_size}, block={block_size}")
+
+        labels_flat, medoid_idx = pam_clara(
+            feats, pixels_small, k,
+            metric=str(args.pam_metric),
+            sample_size=sample_size,
+            num_samples=num_samples,
+            val_size=val_size,
+            block_size=block_size,
+            random_state=int(getattr(args, 'pam_random_state', 42)),
+            max_iter=100,
+        )
+        labels_small = labels_flat.reshape(Hs, Ws).astype(np.uint8)
+
+        # Medoids are real pixels → use their RGB for downstream swatches/recipes
+        medoid_rgbs = pixels_small[medoid_idx]
+        centroids = np.clip(np.rint(medoid_rgbs), 0, 255).astype(np.uint8)
 
     # Upsample labels to full res
     labels_full = Image.fromarray(labels_small, mode="L").resize((orig_w, orig_h), resample=Image.NEAREST)
@@ -2149,6 +2425,10 @@ if __name__ == "__main__":
         "realesrgan_scale_choices": (2, 3, 4),  # allowed scale factors
         # --- Pre-brighten (applied AFTER upscaling, BEFORE analysis)
         "pre_brighten_pct": 10, # 0 = no change; 1..100 = percentage increase in brightness
+        # --- Clustering (auto PAM+CLARA) ---
+        "cluster_algo": "pam",  # {"kmeans","pam"}
+        "pam_metric": "deltaE00",  # {"deltaE00","deltaE76","L2"}
+        "pam_random_state": 42,  # reproducibility
     }
 
     main()
