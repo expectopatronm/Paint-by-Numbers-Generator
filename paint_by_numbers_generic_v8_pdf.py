@@ -1,32 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Paint-by-Numbers PDF generator with tinting-strength aware mixing for oil paints.
-
-This version attempts to mitigate two common real-life mismatches:
-
-1. Strong pigments (black, phthalo green, etc.) dominating mixes unrealistically under
-   a naive “parts count” model (i.e. “5 parts black” is overkill).
-2. Warm browns or flesh tones drifting too pink or oversaturated in predicted mixes.
-
-It does this by:
-- Assigning a **strength multiplier** to each base pigment.
-- Scaling raw mixing “parts” by strength, then applying a diminishing-returns transform.
-- Mixing in a hybrid empirical KM-style reflectance model (absorption + scattering proxies).
-- Applying a mild hue-limited bias correction only in warm/brown hue zones.
-- Preserving all your clustering, region cleanup, palette enforcement, key drawing,
-  PDF output, etc., exactly as before.
-
-You’ll want to tune the `STRENGTH` values and bias thresholds to match your actual pigments.
-
-References:
-- The Kubelka–Munk model is foundational to pigment mixing theory :contentReference[oaicite:0]{index=0}
-- Modern oil paint mixing experiments use K and S spectra for better predictive accuracy :contentReference[oaicite:1]{index=1}
-- Tinting strength (how strongly a pigment “tints” a mix) is well known in coatings and paint science :contentReference[oaicite:2]{index=2}
-- Pigment particle size strongly influences tinting strength :contentReference[oaicite:3]{index=3}
-"""
-
 from __future__ import annotations
 import os
 import subprocess
@@ -1456,7 +1430,7 @@ def run_centerline_trace(args):
       - (optional) grid_color: int (0..255)  # if not present, use 200
     """
     if not hasattr(args, "outline_gray") or args.outline_gray is None:
-        print("⚠️  No stencil available for centerline tracing — skipped.")
+        print("No stencil available for centerline tracing — skipped.")
         return
 
     gray = args.outline_gray
@@ -1518,7 +1492,7 @@ def run_centerline_trace(args):
 
     # Save SVG
     dwg.save()
-    print(f"✅ Centerline SVG with grid saved: {args.centerline_output} (blur={args.centerline_blur}, simplify={args.centerline_simplify}, grid_step={grid_step})")
+    print(f"Centerline SVG with grid saved: {args.centerline_output} (blur={args.centerline_blur}, simplify={args.centerline_simplify}, grid_step={grid_step})")
 
     # Optional vpype post-processing if installed
     try:
@@ -1529,9 +1503,9 @@ def run_centerline_trace(args):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
-        print("✅ vpype optimization applied.")
+        print("vpype optimization applied.")
     except Exception:
-        print("ℹ️  vpype not available — saved raw SVG instead.")
+        print("vpype not available — saved raw SVG instead.")
 
 
 def _auto_grid_step(img_width: int, min_cols: int) -> int:
@@ -1697,7 +1671,7 @@ def main(config: dict | None = None):
         # Use Lab features for perceptual ΔE metrics
         if args.pam_metric in ("deltaE00", "deltaE76"):
             if args.cluster_space != "lab":
-                print("⚠️ pam_metric is perceptual; forcing cluster_space='lab' for PAM.")
+                print("pam_metric is perceptual; forcing cluster_space='lab' for PAM.")
 
             def _rgbrows_to_labrows(arr_uint8):
                 out = np.empty((arr_uint8.shape[0], 3), dtype=np.float32)
@@ -2385,7 +2359,7 @@ if __name__ == "__main__":
         # --- Pre-brighten (applied AFTER upscaling, BEFORE analysis)
         "pre_brighten_pct": 10, # 0 = no change; 1..100 = percentage increase in brightness
         # --- Clustering (auto PAM+CLARA) ---
-        "cluster_algo": "pam",  # {"kmeans","pam"}
+        "cluster_algo": "kmeans",  # {"kmeans","pam"}
         "pam_metric": "deltaE00",  # {"deltaE00","deltaE76","L2"}
         "pam_random_state": 42,  # reproducibility
     }
