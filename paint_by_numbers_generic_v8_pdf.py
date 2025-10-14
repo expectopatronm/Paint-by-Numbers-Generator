@@ -28,12 +28,14 @@ References:
 """
 
 from __future__ import annotations
-from concurrent.futures import ProcessPoolExecutor
 import os
+import subprocess
 import itertools
-from typing import Dict, List, Sequence, Tuple
 from types import SimpleNamespace
+from typing import Dict, List, Sequence, Tuple
+from dataclasses import dataclass
 from functools import lru_cache
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import cv2
@@ -45,16 +47,11 @@ from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.cluster import KMeans
 import textwrap as _tw
 import colorsys
+import mixbox as _mixbox
 
 import svgwrite
 from skimage.morphology import skeletonize
 from skimage import measure
-
-from dataclasses import dataclass
-
-import subprocess
-
-import mixbox as _mixbox
 
 
 # Cache latents for speed
