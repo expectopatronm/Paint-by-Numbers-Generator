@@ -128,13 +128,24 @@ def _maybe_upscale_with_realesrgan(input_path: str,
                                    *,
                                    enable: bool,
                                    ok_min: int,
-                                   target: int,
+                                   target: int | None,
                                    bin_path: str,
+                                   model_dir: str | None = None,
+                                   model_name: str | None = None,
                                    choices=(2, 3, 4)) -> str:
     """
-    If enabled and the longest side is < ok_min, upscale with realesrgan
-    to bring it above ok_min using the smallest scale in `choices`.
-    Does NOT clamp down if it overshoots the target.
+    If enabled and the longest side is < ok_min, upscale with Real-ESRGAN
+    using realesrgan-ncnn-vulkan.
+
+    Args:
+        input_path: Path to input image.
+        enable: Whether to perform upscaling.
+        ok_min: Minimum acceptable longest dimension (px) before upscaling.
+        target: Target longest side (unused here, kept for API compatibility).
+        bin_path: Path to realesrgan-ncnn-vulkan executable.
+        model_dir: Directory containing model .bin/.param files.
+        model_name: Model name (e.g. "realesrgan-x4plus").
+        choices: Allowed upscale factors (default: 2, 3, 4).
     """
     if not enable:
         return input_path
@@ -147,26 +158,32 @@ def _maybe_upscale_with_realesrgan(input_path: str,
         return input_path
 
     longest = max(w, h)
-    # If already >= ok_min, no upscale
+
     if longest >= ok_min:
         print(f"ℹ️  Upscale check: longest={longest}px ≥ {ok_min}px → no upscale.")
         return input_path
 
-    # Pick the smallest scale that reaches ok_min
+    # Determine scale factor
     scale = None
     for s in sorted(choices):
         if longest * s >= ok_min:
             scale = s
             break
     if scale is None:
-        scale = max(choices)  # fallback
+        scale = max(choices)
 
     root, _ = os.path.splitext(os.path.abspath(input_path))
     up_path = f"{root}.upx{scale}.png"
 
+    # Build the command
     cmd = [str(bin_path), "-s", str(scale), "-i", input_path, "-o", up_path]
+    if model_dir:
+        cmd += ["-m", str(model_dir)]
+    if model_name:
+        cmd += ["-n", str(model_name)]
+
     try:
-        print(f"⏫ Running: {' '.join(cmd)}")
+        print(f"⏫ Running Real-ESRGAN: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
     except Exception as e:
         print(f"⚠️  Real-ESRGAN failed ({e}). Using original image.")
@@ -1412,8 +1429,10 @@ def main(config: dict | None = None):
         args.input,
         enable=bool(getattr(args, "enable_upscale", True)),
         ok_min=int(getattr(args, "upscale_ok_min_long", 2500)),
-        target=None,  # kept for signature compatibility, but unused
+        target=None,
         bin_path=str(getattr(args, "realesrgan_bin", "realesrgan-ncnn-vulkan")),
+        model_dir=str(getattr(args, "realesrgan_model_dir", "")),
+        model_name=str(getattr(args, "realesrgan_model_name", "")),
         choices=tuple(getattr(args, "realesrgan_scale_choices", (2, 3, 4))),
     )
 
@@ -2113,7 +2132,10 @@ if __name__ == "__main__":
         # --- Optional pre-upscale with Real-ESRGAN ---
         "enable_upscale": True,  # turn on/off the pre-upscale
         "upscale_ok_min_long": 2500,  # if longest side >= this → no upscale
-        "realesrgan_bin": "realesrgan-ncnn-vulkan",  # path or command name
+        "realesrgan_bin": "realesrgan-ncnn-vulkan-20220424-windows/realesrgan-ncnn-vulkan.exe",
+        # (recommended) also add:
+        "realesrgan_model_dir": "realesrgan-ncnn-vulkan-20220424-windows/models",
+        "realesrgan_model_name": "realesrgan-x4plus", # matches your .bin/.param files
         "realesrgan_scale_choices": (2, 3, 4),  # allowed scale factors
     }
 
