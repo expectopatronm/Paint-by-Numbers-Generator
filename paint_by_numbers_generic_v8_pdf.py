@@ -102,7 +102,7 @@ def _choose_scale(longest: int, *,
     without needing to exceed `target` (we'll clamp down afterwards if we overshoot).
     Returns None if no upscaling is needed.
     """
-    if longest >= ok_min and longest < target:
+    if ok_min <= longest < target:
         return None    # already acceptable per user rule
     if longest >= target:
         return None    # already >= 3000 -> don't upscale
