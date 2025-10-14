@@ -54,15 +54,8 @@ from dataclasses import dataclass
 
 import subprocess
 
-try:
-    import mixbox as _mixbox  # pip install pymixbox
-    _HAS_MIXBOX = True
-except Exception:
-    _HAS_MIXBOX = False
+import mixbox as _mixbox
 
-def _require_mixbox():
-    if not _HAS_MIXBOX:
-        raise RuntimeError("The 'learned' model requires 'pymixbox' (pip install pymixbox)")
 
 # Cache latents for speed
 _MIXBOX_LATENTS: dict[tuple[int,int,int], list[float]] = {}
@@ -83,7 +76,6 @@ def mix_learned(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
     - latent -> RGB
     Returns sRGB uint8 floats (0..255).
     """
-    _require_mixbox()
     parts = np.asarray(parts, dtype=float)
     if parts.sum() <= 0:
         return base_rgbs[0].astype(float)
