@@ -374,13 +374,13 @@ def _maybe_upscale_with_realesrgan(input_path: str,
         with Image.open(input_path) as im:
             w, h = im.size
     except Exception as e:
-        print(f"⚠️  Could not open input for pre-check: {e}. Skipping upscale.")
+        print(f"Could not open input for pre-check: {e}. Skipping upscale.")
         return input_path
 
     longest = max(w, h)
 
     if longest >= ok_min:
-        print(f"ℹ️  Upscale check: longest={longest}px ≥ {ok_min}px → no upscale.")
+        print(f"Upscale check: longest={longest}px ≥ {ok_min}px → no upscale.")
         return input_path
 
     # Determine scale factor
@@ -403,18 +403,18 @@ def _maybe_upscale_with_realesrgan(input_path: str,
         cmd += ["-n", str(model_name)]
 
     try:
-        print(f"⏫ Running Real-ESRGAN: {' '.join(cmd)}")
+        print(f"Running Real-ESRGAN: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
     except Exception as e:
-        print(f"⚠️  Real-ESRGAN failed ({e}). Using original image.")
+        print(f"Real-ESRGAN failed ({e}). Using original image.")
         return input_path
 
     try:
         with Image.open(up_path) as up:
             uw, uh = up.size
-        print(f"✅ Upscaled to: {uw}×{uh}")
+        print(f"Upscaled to: {uw}×{uh}")
     except Exception:
-        print(f"✅ Upscaled (file saved): {up_path}")
+        print(f"Upscaled (file saved): {up_path}")
 
     return up_path
 
@@ -765,39 +765,6 @@ def bias_warm_browns(rgb: np.ndarray) -> np.ndarray:
 # ---------------------------
 # Mixing models
 # ---------------------------
-
-def mix_linear(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
-    """
-    Simple linear-light weighted average mixing.
-    This is a purely additive model (not physically accurate for pigments).
-    """
-    w = parts / np.sum(parts)
-    lin = np.sum(srgb_to_linear_arr((base_rgbs / 255.0).T) * w, axis=1)
-    return np.clip(255.0 * linear_to_srgb_arr(lin), 0, 255)
-
-
-def mix_lab(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
-    """
-    Perceptual mixing via averaging in Lab space.
-    Useful fallback but often too light in shadows.
-    """
-    w = parts / np.sum(parts)
-    labs = np.array([rgb8_to_lab(c) for c in base_rgbs], dtype=np.float32)
-    lab = np.sum(labs.T * w, axis=1)
-    return np.clip(lab_to_rgb8(lab), 0, 255)
-
-
-def mix_subtractive(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
-    """
-    Simple subtractive heuristic: 1 - Π(1 - c)^w per channel.
-    Works okay in some midtones, but lacks realism near extremes.
-    """
-    w = parts / np.sum(parts)
-    c = (base_rgbs / 255.0)
-    res = 1.0 - np.prod((1.0 - c) ** w[:, None], axis=0)
-    return np.clip(res * 255.0, 0, 255)
-
-
 def mix_km_generic(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
     """
     Basic KM-like mixing (Beer-Lambert per-channel) without strength correction.
@@ -881,18 +848,10 @@ def mix_color(parts: np.ndarray,
     Dispatch mixing by chosen model.
     For the “km” model, you must supply base_names so strength is aligned.
     """
-    if model == "linear":
-        return mix_linear(parts, base_rgbs)
-    elif model == "lab":
-        return mix_lab(parts, base_rgbs)
-    elif model == "subtractive":
-        return mix_subtractive(parts, base_rgbs)
-    elif model == "km":
+    if model == "km":
         return mix_km_strength(parts, base_rgbs, base_names)
     elif model == "learned":                      # <--- NEW
         return mix_learned(parts, base_rgbs)
-    else:
-        return mix_linear(parts, base_rgbs)
 
 # ---------------------------
 # Recipe enumeration / search
@@ -1682,11 +1641,11 @@ def main(config: dict | None = None):
             factor = _map_pre_brighten_pct_to_factor(pct)
             factor = 1.0 + (max(0.0, min(100.0, pct)) / 100.0)
             img = ImageEnhance.Brightness(img).enhance(factor)
-            print(f"✨ Pre-brighten applied: +{pct:.1f}")
+            print(f"Pre-brighten applied: +{pct:.1f}")
         else:
-            print("✨ Pre-brighten skipped (pre_brighten_pct=0).")
+            print("Pre-brighten skipped (pre_brighten_pct=0).")
     except Exception as e:
-        print(f"⚠️  Pre-brighten failed ({e}) — continuing with unmodified image.")
+        print(f"Pre-brighten failed ({e}) — continuing with unmodified image.")
 
     orig_w, orig_h = img.size
 
@@ -1759,7 +1718,7 @@ def main(config: dict | None = None):
         val_size = auto["val_size"]
         block_size = auto["block_size"]
 
-        print(f"ℹ️ PAM/CLARA(auto): n={n}, k={k}, metric={args.pam_metric}, "
+        print(f"PAM/CLARA(auto): n={n}, k={k}, metric={args.pam_metric}, "
               f"sample={sample_size}, samples={num_samples}, val={val_size}, block={block_size}")
 
         labels_flat, medoid_idx = pam_clara(
@@ -2213,12 +2172,12 @@ def main(config: dict | None = None):
 
             if not majority_ok:
                 print(
-                    f"ℹ️  Skipping workflow pages: only {derivable_count}/{total_colors} colors "
+                    f"Skipping workflow pages: only {derivable_count}/{total_colors} colors "
                     f"({100.0 * derivable_count / max(1, total_colors):.1f}%) were derivable from the graph."
                 )
             else:
                 print(
-                    f"✅ Building workflow pages: {derivable_count}/{total_colors} colors "
+                    f"Building workflow pages: {derivable_count}/{total_colors} colors "
                     f"({100.0 * derivable_count / max(1, total_colors):.1f}%) are derivable."
                 )
 
@@ -2286,7 +2245,7 @@ def main(config: dict | None = None):
         ax.imshow(completed_with_grid); ax.set_title("Completed — All Colors Applied + Grid", pad=2); ax.axis("off")
         pdf.savefig(fig, dpi=300); plt.close(fig)
 
-    print(f"✅ Saved A4 landscape PDF to {args.pdf} (frame-mode={args.frame_mode}, outline={args.outline_mode})")
+    print(f"Saved A4 landscape PDF to {args.pdf} (frame-mode={args.frame_mode}, outline={args.outline_mode})")
 
     # --------------------------------------------------
     # Optional: export centerline SVG for Inkscape plotting
