@@ -1,3 +1,8 @@
+opencv-python
+numpy
+scikit-image
+svgwrite
+mixbox
 pillow
 matplotlib
 scikit-learn
