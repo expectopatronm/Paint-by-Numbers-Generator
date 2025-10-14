@@ -412,7 +412,7 @@ def _maybe_upscale_with_realesrgan(input_path: str,
     try:
         with Image.open(up_path) as up:
             uw, uh = up.size
-        print(f"✅ Upscaled to {uw}×{uh} (longest={max(uw, uh)}px).")
+        print(f"✅ Upscaled to: {uw}×{uh}")
     except Exception:
         print(f"✅ Upscaled (file saved): {up_path}")
 
@@ -1682,7 +1682,7 @@ def main(config: dict | None = None):
             factor = _map_pre_brighten_pct_to_factor(pct)
             factor = 1.0 + (max(0.0, min(100.0, pct)) / 100.0)
             img = ImageEnhance.Brightness(img).enhance(factor)
-            print(f"✨ Pre-brighten applied: +{pct:.1f}% (factor {factor:.3f})")
+            print(f"✨ Pre-brighten applied: +{pct:.1f}")
         else:
             print("✨ Pre-brighten skipped (pre_brighten_pct=0).")
     except Exception as e:
