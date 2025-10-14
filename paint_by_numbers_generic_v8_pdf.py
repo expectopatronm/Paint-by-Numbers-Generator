@@ -1400,6 +1400,12 @@ def _recipe_worker(color_rgb_list,
     }
 
 
+def _map_pre_brighten_pct_to_factor(pct: float) -> float:
+    """Clamp 0..100 → factor 1.00..2.00."""
+    p = max(0.0, min(100.0, float(pct)))
+    return 1.0 + (p / 100.0)
+
+
 # ---------------------------
 # Main (DICT config, no argparse)
 # ---------------------------
@@ -1436,6 +1442,21 @@ def main(config: dict | None = None):
     # Load + optional resize for clustering (unchanged, but now uses the possibly upscaled path)
     # -------------------------
     img = Image.open(args.input).convert("RGB")
+
+    # --- PRE-BRIGHTEN: apply a 0..100% increase (mapped to factor 1.00..2.00)
+    try:
+        pct = float(getattr(args, "pre_brighten_pct", 0))
+        if pct > 0:
+            # use helper if added:
+            factor = _map_pre_brighten_pct_to_factor(pct)
+            factor = 1.0 + (max(0.0, min(100.0, pct)) / 100.0)
+            img = ImageEnhance.Brightness(img).enhance(factor)
+            print(f"✨ Pre-brighten applied: +{pct:.1f}% (factor {factor:.3f})")
+        else:
+            print("✨ Pre-brighten skipped (pre_brighten_pct=0).")
+    except Exception as e:
+        print(f"⚠️  Pre-brighten failed ({e}) — continuing with unmodified image.")
+
     orig_w, orig_h = img.size
 
     # If grid_step is "auto" (or <=0 / None), compute from width
@@ -2126,6 +2147,8 @@ if __name__ == "__main__":
         "realesrgan_model_dir": "realesrgan-ncnn-vulkan-20220424-windows/models",
         "realesrgan_model_name": "realesrgan-x4plus", # matches your .bin/.param files
         "realesrgan_scale_choices": (2, 3, 4),  # allowed scale factors
+        # --- Pre-brighten (applied AFTER upscaling, BEFORE analysis)
+        "pre_brighten_pct": 10, # 0 = no change; 1..100 = percentage increase in brightness
     }
 
     main()
