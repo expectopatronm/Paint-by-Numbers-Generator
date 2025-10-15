@@ -1855,25 +1855,25 @@ if __name__ == "__main__":
     BASE_PALETTE = {
         # Existing colors
         "Titanium White": (218, 220, 224),
-        "Lemon Yellow": (232, 206, 6),
-        "Vermillion Red": (231, 44, 75),
-        "Carmine": (213, 14, 33),
-        "Ultramarine": (39, 51, 115),
-        "Pthalo Green": (4, 95, 94),
-        "Yellow Ochre": (200, 143, 16),
-        "Lamp Black": (24, 14, 19),
+        # "Lemon Yellow": (232, 206, 6),
+        # "Vermillion Red": (231, 44, 75),
+        # "Carmine": (213, 14, 33),
+        # "Ultramarine": (39, 51, 115),
+        # "Pthalo Green": (4, 95, 94),
+        "Yellow Ochre": (226, 145, 0),
+        # "Lamp Black": (24, 14, 19),
 
         # New Schmincke Norma colors
-        # "Cobalt Blue Hue": (45, 80, 170),  # mid-value, cooler than Ultramarine
-        # "Payne's Grey": (45, 60, 80),  # deep bluish-grey
-        # "Ivory Black": (26, 23, 24),  # slightly warmer than Lamp Black
-        # "Indian Yellow": (230, 150, 20),  # transparent orange-yellow
-        "Alizarin Crimson Hue": (120, 20, 30),  # deep cool red
-        "Vandyke Brown": (45, 30, 20),  # dark warm brown
-        "Indigo": (25, 40, 70),  # deep blue with grey undertone
-        "Olive Green": (90, 100, 40),  # muted earthy green
-        "Burnt Umber": (42, 17, 12),
-        "Burnt Sienna": (80, 36, 25),
+        "Cobalt Blue Hue": (1, 44, 145),  # mid-value, cooler than Ultramarine
+        "Payne's Grey": (39, 39, 41),  # deep bluish-grey
+        "Ivory Black": (7, 6, 2),  # slightly warmer than Lamp Black
+        "Indian Yellow": (248, 158, 4),  # transparent orange-yellow
+        "Alizarin Crimson Hue": (167, 1, 13),  # deep cool red
+        "Vandyke Brown": (15, 11, 7),  # dark warm brown
+        "Indigo": (29, 35, 69),  # deep blue with grey undertone
+        "Olive Green": (66, 81, 28),  # muted earthy green
+        "Burnt Umber": (86, 66, 48),
+        "Burnt Sienna": (121, 66, 50),
     }
 
     # Tinting strength multipliers: how strongly each pigment “tints” per unit part.
@@ -1881,19 +1881,19 @@ if __name__ == "__main__":
     # You will need to calibrate these by observing real mixtures.
     STRENGTH = {
         "Titanium White": 1.0,
-        "Lemon Yellow": 0.9,
-        "Vermillion Red": 1.1,
-        "Carmine": 1.2,
-        "Ultramarine": 1.0,
-        "Pthalo Green": 2.0,
+        # "Lemon Yellow": 0.9,
+        # "Vermillion Red": 1.1,
+        # "Carmine": 1.2,
+        # "Ultramarine": 1.0,
+        # "Pthalo Green": 2.0,
         "Yellow Ochre": 0.7,
-        "Lamp Black": 2.5,
+        # "Lamp Black": 2.5,
 
         # New Schmincke Norma colors
-        # "Cobalt Blue Hue": 0.9,  # moderate tinting, weaker than Phthalo
-        # "Payne's Grey": 1.5,  # quite strong because of black + blue mix
-        # "Ivory Black": 2.3,  # slightly less strong than Lamp Black
-        # "Indian Yellow": 1.2,  # transparent and strong tint
+        "Cobalt Blue Hue": 0.9,  # moderate tinting, weaker than Phthalo
+        "Payne's Grey": 1.5,  # quite strong because of black + blue mix
+        "Ivory Black": 2.3,  # slightly less strong than Lamp Black
+        "Indian Yellow": 1.2,  # transparent and strong tint
         "Alizarin Crimson Hue": 1.3,  # deep tint, transparent
         "Vandyke Brown": 1.0,  # moderate tinting, earthy
         "Indigo": 1.4,  # strong tint due to dark synthetic pigments
