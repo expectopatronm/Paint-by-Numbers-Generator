@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 import os
+import time
 import subprocess
 import itertools
 from types import SimpleNamespace
@@ -1252,18 +1253,67 @@ def run_centerline_trace(args):
     dwg.save()
     print(f"Centerline SVG with grid saved: {args.centerline_output} (blur={args.centerline_blur}, simplify={args.centerline_simplify}, grid_step={grid_step})")
 
-    # Optional vpype post-processing if installed
+    # ----------------------------------------------------
+    # B) PAPER CANVAS SVG (portrait, mm) — scale+center the
+    #    ORIGINAL pixel grid + centerlines together (no warp)
+    # ----------------------------------------------------
+    Wmm, Hmm  = float(getattr(args, "canvas_dimensions_mm")[0]), float(getattr(args, "canvas_dimensions_mm")[1])
+
+    canvas_out = getattr(args, "centerline_canvas_output", None) or (
+        os.path.splitext(args.centerline_output)[0] + "_canvas.svg"
+    )
+
+    from svgwrite import Drawing
+    dwg_mm = Drawing(canvas_out, size=(f"{Wmm}mm", f"{Hmm}mm"), viewBox=f"0 0 {Wmm} {Hmm}")
+
+    # Compute uniform scale that fits the pixel artwork (w×h) inside the page
+    # Scale by the same percentage in X and Y (no warping), then center.
+    s = min(Wmm / float(w), Hmm / float(h)) if (w > 0 and h > 0) else 1.0
+    tx = (Wmm - s * w) / 2.0
+    ty = (Hmm - s * h) / 2.0
+
+    # Everything (grid + centerlines) goes into one transformed group
+    root = dwg_mm.g(transform=f"translate({tx},{ty}) scale({s})")
+
+    # ---- redraw the ORIGINAL pixel-space grid so it scales together with the sketch
+    grid_step_px = int(getattr(args, "grid_step", 250))  # same step as pixel SVG
+    grid_gray = int(getattr(args, "grid_color", 200))
+    grid_hex = _gray_int_to_hex(grid_gray)
+
+    if grid_step_px > 0:
+        x = 0
+        while x <= w:
+            root.add(dwg_mm.line(start=(x, 0), end=(x, h), stroke=grid_hex, stroke_width=0.5, opacity=0.7))
+            x += grid_step_px
+        y = 0
+        while y <= h:
+            root.add(dwg_mm.line(start=(0, y), end=(w, y), stroke=grid_hex, stroke_width=0.5, opacity=0.7))
+            y += grid_step_px
+
+    # ---- centerlines (pixel coords) go into the same group
+    for cnt in contours:
+        pts = [(float(c[1]), float(c[0])) for c in cnt]
+        if args.centerline_simplify > 0:
+            epsilon = float(args.centerline_simplify)
+            approx = cv2.approxPolyDP(np.array(pts, dtype=np.float32), epsilon, False)
+            pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
+        # Stroke width scales with the group so grid + lines look consistent
+        root.add(dwg_mm.polyline(points=pts, fill="none", stroke="black", stroke_width=0.1))
+
+    dwg_mm.add(root)
+    dwg_mm.save()
+    print(f"Centerline canvas SVG saved: {canvas_out} (paper {Wmm}×{Hmm} mm, uniform scale, centered)")
+
+    # Optional: vpype optimization for the canvas file
     try:
-        import subprocess
         subprocess.run(
-            ["vpype", "read", args.centerline_output, "linemerge", "linesimplify", "-t", "0.3", "reloop", "write", args.centerline_output],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            ["vpype", "read", canvas_out, "linemerge", "linesimplify", "-t", "0.3", "reloop", "write", canvas_out],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        print("vpype optimization applied.")
+        print("vpype optimization applied (canvas SVG).")
     except Exception:
-        print("vpype not available — saved raw SVG instead.")
+        print("vpype not available — saved raw canvas SVG instead.")
+
 
 
 def _auto_grid_step(img_width: int, min_cols: int) -> int:
@@ -1336,6 +1386,8 @@ def main(config: dict | None = None):
     Pass only the keys you want to override; unspecified keys use DEFAULT_CONFIG.
     """
     global BASE_PALETTE, STRENGTH, USE_TINTING_STRENGTH
+
+    t0 = time.perf_counter()  # <<< start timer
 
     cfg = {**DEFAULT_CONFIG, **(config or {})}
     args = SimpleNamespace(**cfg)
@@ -1846,6 +1898,10 @@ def main(config: dict | None = None):
         args.outline_gray = locals().get("outline_gray", None)
         run_centerline_trace(args)
 
+    # <<< end timer + print
+    elapsed = time.perf_counter() - t0
+    print(f"Total time: {elapsed:.2f}s")
+
 
 if __name__ == "__main__":
 
@@ -1972,6 +2028,8 @@ if __name__ == "__main__":
         "realesrgan_scale_choices": (2, 3, 4),  # allowed scale factors
         # --- Pre-brighten (applied AFTER upscaling, BEFORE analysis)
         "pre_brighten_pct": 5, # 0 = no change; 1..100 = percentage increase in brightness
+        # --- Canvas Dimensions ---
+        "canvas_dimensions_mm": (240, 300)
     }
 
     main()
