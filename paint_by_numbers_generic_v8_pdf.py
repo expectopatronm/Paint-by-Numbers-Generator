@@ -1972,10 +1972,6 @@ if __name__ == "__main__":
         "realesrgan_scale_choices": (2, 3, 4),  # allowed scale factors
         # --- Pre-brighten (applied AFTER upscaling, BEFORE analysis)
         "pre_brighten_pct": 5, # 0 = no change; 1..100 = percentage increase in brightness
-        # --- Clustering (auto PAM+CLARA) ---
-        "cluster_algo": "kmeans",  # {"kmeans"}
-        "pam_metric": "deltaE00",  # {"deltaE00","deltaE76","L2"}
-        "pam_random_state": 42,  # reproducibility
     }
 
     main()
