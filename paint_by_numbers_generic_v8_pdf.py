@@ -1860,10 +1860,10 @@ if __name__ == "__main__":
         # "Carmine": (213, 14, 33),
         # "Ultramarine": (39, 51, 115),
         # "Pthalo Green": (4, 95, 94),
-        "Yellow Ochre": (226, 145, 0),
         # "Lamp Black": (24, 14, 19),
 
         # New Schmincke Norma colors
+        "Yellow Ochre": (226, 145, 0),
         "Cobalt Blue Hue": (1, 44, 145),  # mid-value, cooler than Ultramarine
         "Payne's Grey": (39, 39, 41),  # deep bluish-grey
         "Ivory Black": (7, 6, 2),  # slightly warmer than Lamp Black
@@ -1886,10 +1886,10 @@ if __name__ == "__main__":
         # "Carmine": 1.2,
         # "Ultramarine": 1.0,
         # "Pthalo Green": 2.0,
-        "Yellow Ochre": 0.7,
         # "Lamp Black": 2.5,
 
         # New Schmincke Norma colors
+        "Yellow Ochre": 0.7,
         "Cobalt Blue Hue": 0.9,  # moderate tinting, weaker than Phthalo
         "Payne's Grey": 1.5,  # quite strong because of black + blue mix
         "Ivory Black": 2.3,  # slightly less strong than Lamp Black
