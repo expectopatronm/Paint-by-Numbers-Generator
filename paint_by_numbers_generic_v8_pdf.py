@@ -1257,7 +1257,8 @@ def run_centerline_trace(args):
     # B) PAPER CANVAS SVG (portrait, mm) — scale+center the
     #    ORIGINAL pixel grid + centerlines together (no warp)
     # ----------------------------------------------------
-    Wmm, Hmm  = float(getattr(args, "canvas_dimensions_mm")[0]), float(getattr(args, "canvas_dimensions_mm")[1])
+    dims = getattr(args, "canvas_dimensions_mm", (240, 300))
+    Wmm, Hmm = float(dims[0]), float(dims[1])
 
     canvas_out = getattr(args, "centerline_canvas_output", None) or (
         os.path.splitext(args.centerline_output)[0] + "_canvas.svg"
