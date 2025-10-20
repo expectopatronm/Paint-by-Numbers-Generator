@@ -294,7 +294,8 @@ def draw_build_graph_page(approx_rgb_uint8: np.ndarray,
                           parent: dict[int, int|None],
                           extras_label: dict[int,str],
                           *,
-                          title: str = "Build Dependency Graph (Neutral)"):
+                          title: str = "Build Dependency Graph (Neutral)",
+                          imprimatura: dict | None = None):
     fig = plt.figure(figsize=(11.69, 8.27))  # A4 landscape
     ax = fig.add_subplot(111)
     ax.set_title(title, pad=8, fontsize=12)
@@ -337,6 +338,29 @@ def draw_build_graph_page(approx_rgb_uint8: np.ndarray,
 
     ax.text(0.015, 0.03, "Arrow: add parts to reach child • Edge label: parts× pigment",
             fontsize=8, ha="left", va="bottom", transform=ax.transAxes)
+
+    # --- Optional imprimatura panel (swatch + recipe) ---
+    if imprimatura is not None:
+        # Panel position (in axes fraction coords)
+        x0, y0, w, h = 0.67, 0.05, 0.30, 0.22
+        ax.add_patch(Rectangle((x0, y0), w, h,
+                               transform=ax.transAxes, facecolor="white", edgecolor="black", lw=0.6))
+        ax.text(x0 + 0.015, y0 + h - 0.06, "Imprimatura (toned ground)", transform=ax.transAxes,
+                fontsize=9, fontweight="bold", va="top")
+        # Swatch
+        sw = imprimatura.get("rgb", np.array([190,150,110], dtype=np.uint8)) / 255.0
+        ax.add_patch(Rectangle((x0 + 0.015, y0 + 0.02), 0.12, 0.12,
+                               transform=ax.transAxes, facecolor=tuple(sw), edgecolor="black", lw=0.4))
+        # Text
+        recipe = imprimatura.get("recipe_text", "—")
+        L = imprimatura.get("Lstar", None)
+        de = imprimatura.get("deltaE", None)
+        lines = [f"Recipe: {recipe}"]
+        if L is not None: lines.append(f"L*≈{L:.1f} (mid-tone)")
+        if de is not None: lines.append(f"ΔE to target≈{de:.2f}")
+        lines.append("Tip: apply as a thin, transparent wash.")
+        ax.text(x0 + 0.15, y0 + 0.02, "\n".join(lines), transform=ax.transAxes, fontsize=8, va="bottom")
+
     return fig
 
 
@@ -1379,6 +1403,88 @@ def _map_pre_brighten_pct_to_factor(pct: float) -> float:
 
 
 # ---------------------------
+# Image-aware Imprimatura selection
+# ---------------------------
+def _rgb_to_lab_arr_u8(rows_u8: np.ndarray) -> np.ndarray:
+    # rows_u8: N x 3 uint8
+    labs = [rgb8_to_lab(r.astype(np.float32)) for r in rows_u8]
+    return np.vstack(labs).astype(np.float32)
+
+def _rgb_to_hsv_arr_u8(rows_u8: np.ndarray) -> np.ndarray:
+    out = []
+    for r,g,b in rows_u8:
+        h,s,v = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
+        out.append((h*360.0, s, v))
+    return np.array(out, dtype=np.float32)
+
+def _dominant_hue_deg(rows_u8: np.ndarray, *, min_sat=0.15, k=3) -> float | None:
+    """Find a dominant hue (in degrees) from moderately saturated pixels."""
+    hsv = _rgb_to_hsv_arr_u8(rows_u8)
+    sel = hsv[hsv[:,1] >= float(min_sat)]
+    if sel.size == 0:
+        return None
+    # k-means on hue on the unit circle
+    H = sel[:,0]  # 0..360
+    # map to 2D circle for clustering
+    pts = np.stack([np.cos(np.deg2rad(H)), np.sin(np.deg2rad(H))], axis=1)
+    km = KMeans(n_clusters=min(k, len(pts)), n_init=8, random_state=42)
+    km.fit(pts)
+    # pick the cluster with most members
+    labels, counts = np.unique(km.labels_, return_counts=True)
+    idx = int(labels[np.argmax(counts)])
+    center = km.cluster_centers_[idx]
+    ang = (np.rad2deg(np.arctan2(center[1], center[0])) + 360.0) % 360.0
+    return float(ang)
+
+
+def choose_imprimatura_target_from_image(rgb_image_u8: np.ndarray,
+                                         *,
+                                         mode: str = "match_light",  # "match_light" | "complement_dominant" | "neutral_warm"
+                                         target_L: float = 50.0,
+                                         chroma_s: float = 0.25) -> np.ndarray:
+    """
+    Returns target sRGB uint8 for imprimatura, computed from the image:
+      - match_light: hue from highlight pixels (top ~20% L*)
+      - complement_dominant: complement of dominant midtone hue
+      - neutral_warm: fixed warm-neutral fallback if scene is ambiguous
+    Value (L*) is clamped near a mid-tone, chroma modest.
+    """
+    H, W, _ = rgb_image_u8.shape
+    flat = rgb_image_u8.reshape(-1,3).astype(np.uint8)
+
+    # LAB for luminance segmentation
+    labs = _rgb_to_lab_arr_u8(flat)
+    Ls = labs[:,0]
+    p80 = np.percentile(Ls, 80)
+    p20, p80_mid = np.percentile(Ls, 20), np.percentile(Ls, 80)
+
+    if mode == "match_light":
+        hl = flat[Ls >= p80]
+        hue = _dominant_hue_deg(hl, min_sat=0.10, k=3)
+        if hue is None:
+            mode = "neutral_warm"
+    if mode == "complement_dominant":
+        midmask = (Ls >= p20) & (Ls <= p80_mid)
+        mids = flat[midmask] if np.count_nonzero(midmask) > 0 else flat
+        hue_dom = _dominant_hue_deg(mids, min_sat=0.12, k=4)
+        hue = ((hue_dom + 180.0) % 360.0) if hue_dom is not None else None
+        if hue is None:
+            mode = "neutral_warm"
+
+    if mode == "neutral_warm":
+        # ~brown-paper warm: ~35°–45° is yellow-orange
+        hue = 38.0
+
+    # Build an HSV with modest chroma; set V from target L* roughly
+    # Approx map L*~V for mid ranges:
+    v = np.clip((target_L/100.0)*0.92 + 0.06, 0.0, 1.0)
+    s = float(np.clip(chroma_s, 0.05, 0.45))
+    r,g,b = colorsys.hsv_to_rgb(hue/360.0, s, v)
+    rgb = np.array([r,g,b])*255.0
+    return np.clip(np.rint(rgb), 0, 255).astype(np.uint8)
+
+
+# ---------------------------
 # Main (DICT config, no argparse)
 # ---------------------------
 def main(config: dict | None = None):
@@ -1708,6 +1814,22 @@ def main(config: dict | None = None):
                        approx_palette=approx_uint8)
         pdf.savefig(fig, dpi=300); plt.close(fig)
 
+        imp_mode = getattr(args, "imprimatura_mode", "match_light")
+        imp_target_rgb = choose_imprimatura_target_from_image(
+            rgb_full, mode=imp_mode, target_L=50.0, chroma_s=0.25
+        )
+
+        imp_entries, imp_rgb, imp_dE = integer_mix_best(
+            imp_target_rgb,
+            args.palette,
+            max_parts=6,
+            max_components=3,
+            model=args.mix_model,
+            use_tinting_strength=bool(args.use_tinting_strength),
+        )
+        imp_rgb = np.clip(np.rint(imp_rgb), 0, 255).astype(np.uint8)
+        imp_L = Lstar_from_rgb(imp_rgb)
+
         # ---- Optional: Build dependency graph page (neutral) ----
         if args.build_graph_page:
             base_order = args.palette
@@ -1729,7 +1851,13 @@ def main(config: dict | None = None):
 
             fig = draw_build_graph_page(
                 approx_uint8, parent_map, extras_label,
-                title="Build Dependency Graph (Neutral, additive steps)"
+                title="Build Dependency Graph (Neutral, additive steps)",
+                imprimatura={
+                    "rgb": imp_rgb,
+                    "recipe_text": recipe_text(imp_entries),
+                    "Lstar": Lstar_from_rgb(imp_rgb),
+                    "deltaE": deltaE_lab(imp_rgb, imp_target_rgb),
+                }
             )
             pdf.savefig(fig, dpi=300);
             plt.close(fig)
@@ -2042,7 +2170,8 @@ if __name__ == "__main__":
         # --- Pre-brighten (applied AFTER upscaling, BEFORE analysis)
         "pre_brighten_pct": 25, # 0 = no change; 1..100 = percentage increase in brightness
         # --- Canvas Dimensions ---
-        "canvas_dimensions_mm": (240, 300)
+        "canvas_dimensions_mm": (240, 300),
+        "imprimatura_mode": "match_light",  # or "complement_dominant" or "neutral_warm"
     }
 
     main()
