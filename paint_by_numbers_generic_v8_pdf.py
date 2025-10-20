@@ -1413,16 +1413,16 @@ def main(config: dict | None = None):
         args.outline_mode = {"old": "image", "new": "labels", "both": "both"}[args.sketch_style]
 
     # -------------------------
-    # Load + optional resize for clustering (unchanged, but now uses the possibly upscaled path)
+    # Load twice: one for OUTLINE (no pre-brighten), one for COLORING (pre-brighten)
     # -------------------------
-    img = Image.open(args.input).convert("RGB")
+    img_outline = Image.open(args.input).convert("RGB")  # upscaled (if enabled), NOT pre-brightened
+    img = img_outline.copy()  # this copy will be pre-brightened for clustering/coloring
 
     # --- PRE-BRIGHTEN: apply a 0..100% increase (mapped to factor 1.00..2.00)
     try:
         pct = float(getattr(args, "pre_brighten_pct", 0))
         if pct > 0:
-            # use helper if added:
-            factor = _map_pre_brighten_pct_to_factor(pct)
+            factor = _map_stencil_brightness_slider(pct / 100.0)  # or keep your factor logic as-is
             factor = 1.0 + (max(0.0, min(100.0, pct)) / 100.0)
             img = ImageEnhance.Brightness(img).enhance(factor)
             print(f"Pre-brighten applied: +{pct:.1f}")
@@ -1432,6 +1432,19 @@ def main(config: dict | None = None):
         print(f"Pre-brighten failed ({e}) — continuing with unmodified image.")
 
     orig_w, orig_h = img.size
+
+    # If grid_step is "auto" ...
+    if (getattr(args, "grid_step", None) in (None, "auto")) or (
+            isinstance(args.grid_step, (int, float)) and args.grid_step <= 0):
+        args.grid_step = _auto_grid_step(orig_w, getattr(args, "grid_min_cols", 5))
+
+    # COLORING (pre-brightened) tensors
+    rgb_full = np.array(img)
+    bgr_full = cv2.cvtColor(rgb_full, cv2.COLOR_RGB2BGR)
+
+    # OUTLINE (upscaled, non-brightened) tensors
+    rgb_outline_full = np.array(img_outline)
+    bgr_outline_full = cv2.cvtColor(rgb_outline_full, cv2.COLOR_RGB2BGR)
 
     # If grid_step is "auto" (or <=0 / None), compute from width
     if (getattr(args, "grid_step", None) in (None, "auto")) or (
@@ -1627,7 +1640,7 @@ def main(config: dict | None = None):
     # -------------------------
     if args.outline_mode in ("image", "both"):
         sketch_gray = pencil_readable_norm(
-            bgr_full, canny_high_pct=float(args.edge_percentile)
+            bgr_outline_full, canny_high_pct=float(args.edge_percentile)
         )
     else:
         sketch_gray = None
@@ -1747,9 +1760,10 @@ def main(config: dict | None = None):
                 # otherwise show the raw outline/combined outline.
                 if args.outline_mode == "image":
                     legacy_page = original_edge_sketch_with_grid(
-                        img, grid_step=args.grid_step, grid_color=200,
+                        img_outline, grid_step=args.grid_step, grid_color=200,
                         canny_high_pct=float(args.edge_percentile)
                     )
+
                     ax.imshow(legacy_page, cmap='gray')
                     ax.set_title(f"Original Edge Sketch + Grid (step={args.grid_step}px)", pad=2)
                     ax.axis("off")
@@ -1927,7 +1941,6 @@ if __name__ == "__main__":
         "Indian Yellow": (248, 158, 4),  # transparent orange-yellow
         "Alizarin Crimson Hue": (167, 1, 13),  # deep cool red
         "Vandyke Brown": (15, 11, 7),  # dark warm brown
-        "Indigo": (29, 35, 69),  # deep blue with grey undertone
         "Olive Green": (66, 81, 28),  # muted earthy green
         "Burnt Umber": (86, 66, 48),
         "Burnt Sienna": (121, 66, 50),
@@ -1953,7 +1966,6 @@ if __name__ == "__main__":
         "Indian Yellow": 1.2,  # transparent and strong tint
         "Alizarin Crimson Hue": 1.3,  # deep tint, transparent
         "Vandyke Brown": 1.0,  # moderate tinting, earthy
-        "Indigo": 1.4,  # strong tint due to dark synthetic pigments
         "Olive Green": 1.1,  # moderate tint, earthy but fairly strong
         "Burnt Umber": 1.0,
         "Burnt Sienna": 0.8,
@@ -2028,7 +2040,7 @@ if __name__ == "__main__":
         "realesrgan_model_name": "realesrgan-x4plus", # matches your .bin/.param files
         "realesrgan_scale_choices": (2, 3, 4),  # allowed scale factors
         # --- Pre-brighten (applied AFTER upscaling, BEFORE analysis)
-        "pre_brighten_pct": 5, # 0 = no change; 1..100 = percentage increase in brightness
+        "pre_brighten_pct": 25, # 0 = no change; 1..100 = percentage increase in brightness
         # --- Canvas Dimensions ---
         "canvas_dimensions_mm": (240, 300)
     }
