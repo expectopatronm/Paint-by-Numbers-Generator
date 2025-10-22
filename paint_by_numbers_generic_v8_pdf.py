@@ -29,6 +29,11 @@ from skimage import measure
 from sklearn.cluster import KMeans
 from sklearn.mixture import BayesianGaussianMixture
 
+# FG/BG separation (optional)
+import torch
+from torchvision import transforms as _tv_transforms
+from transformers import AutoModelForImageSegmentation as _HFSegModel, AutoImageProcessor as _HFProcessor
+
 
 # Cache latents for speed
 _MIXBOX_LATENTS: dict[tuple[int,int,int], list[float]] = {}
@@ -68,6 +73,47 @@ def mix_learned(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
 
     r, g, b = _mixbox.latent_to_rgb(z_mix)  # uint8s
     return np.array([float(r), float(g), float(b)], dtype=float)
+
+
+def rmbg_alpha_matte(input_path: str,
+                     *,
+                     model_dir: str = "rmbg",
+                     device: str | None = None,
+                     target_size: tuple[int,int] = (1024,1024)) -> np.ndarray:
+    """
+    Returns alpha matte in [0..1] as float32, same W×H as the input image.
+    Uses BRIA RMBG-2.0 weights from `model_dir` (Hugging Face layout).
+    """
+    os.environ.setdefault('TRANSFORMERS_CACHE', os.path.dirname(os.path.realpath(__file__)))
+
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    img = Image.open(input_path).convert("RGB")
+    orig_w, orig_h = img.size
+
+    # Load processor & model (trust_remote_code per model card)
+    proc = _HFProcessor.from_pretrained(model_dir, trust_remote_code=True)
+    model = _HFSegModel.from_pretrained(model_dir, trust_remote_code=True).to(device).eval()
+
+    # Basic resize+normalize; model cards often expect ~1024 square
+    tfm = _tv_transforms.Compose([
+        _tv_transforms.Resize(target_size),
+        _tv_transforms.ToTensor(),
+        _tv_transforms.Normalize([0.485, 0.456, 0.406],
+                                 [0.229, 0.224, 0.225]),
+    ])
+    inp = tfm(img).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        out = model(inp)
+        # BRIA RMBG returns last tensor as 1×1×H×W logits
+        logits = out[-1]
+        matte_small = torch.sigmoid(logits).squeeze(0).squeeze(0).detach().cpu().numpy()
+
+    matte_u8 = (np.clip(matte_small, 0, 1) * 255).astype(np.uint8)
+    matte_u8 = np.array(Image.fromarray(matte_u8).resize((orig_w, orig_h), Image.BILINEAR))
+    return matte_u8.astype(np.float32) / 255.0
 
 
 def _choose_scale(longest: int, *,
@@ -1963,19 +2009,39 @@ def main(config: dict | None = None):
                            approx_palette=approx_uint8)
             pdf.savefig(fig, dpi=300); plt.close(fig)
 
+        # --- Optional: build FG/BG masks via RMBG ---
+        fg_mask = bg_mask = None
+        if bool(getattr(args, "separate_fg_bg", False)):
+            try:
+                matte = rmbg_alpha_matte(
+                    args.input,
+                    model_dir=str(getattr(args, "rmbg_model_dir", "rmbg")),
+                    device=getattr(args, "rmbg_device", None),
+                    target_size=tuple(getattr(args, "rmbg_target_size", (1024, 1024))),
+                )
+                thr = float(getattr(args, "rmbg_alpha_threshold", 0.5))
+                fg_mask = (matte >= thr)
+                bg_mask = ~fg_mask
+                print(f"RMBG matte ready (threshold={thr}). "
+                      f"FG px={int(fg_mask.sum())}, BG px={int(bg_mask.sum())}")
+            except Exception as e:
+                print(f"RMBG failed ({e}). Proceeding without FG/BG split.")
+                fg_mask = bg_mask = None
+
         # -------------------------
         # Per-color pages (original order only)
         # -------------------------
         if args.per_color_frames:
-            # Ensure multiply-underlay factor if outline exists
+            # Ensure multiply-underlay factor if outline exists (unchanged)
             a = float(np.clip(args.sketch_alpha, 0.0, 1.0))
             if sketch_factor_rgb is None and outline_gray is not None:
                 s = np.clip(outline_gray.astype(np.float32) / 255.0, 0.0, 1.0)
                 sketch_factor_rgb = ((1.0 - a) + a * s)[..., None]
 
-            # Old area-based order derived from step frames (unchanged)
             H, W = labels_full.shape
             area = np.array([(labels_full == i).sum() for i in range(args.colors)], dtype=np.int64)
+
+            # Build the canonical 'per_color_order' by your Stepwise sequence (unchanged)
             per_color_order = []
             for _title, idxs, _frame in frames_to_emit:
                 for idx in sorted(idxs, key=lambda i: -int(area[i])):
@@ -1985,71 +2051,150 @@ def main(config: dict | None = None):
                 if i not in per_color_order:
                     per_color_order.append(i)
 
-            # Neutral label for right-side note (optional)
-            step_note_map = {i: f"Color #{i + 1}" for i in per_color_order}
+            # --- NEW: When FG/BG split is on, we split that order into two tracks,
+            # following the SAME Stepwise ordering.
+            if bool(getattr(args, "separate_fg_bg", False)) and (fg_mask is not None):
+                # Helper: does color i have any pixels in FG or BG?
+                def has_pixels(i, mask):
+                    return int(np.logical_and(labels_full == i, mask).sum()) > 0
 
-            # Render per-color pages in the decided (original) order
-            prev_mask = np.zeros((H, W), dtype=bool)
-            for i in per_color_order:
-                curr_mask = (labels_full == i)
-                frame_rgb = np.full_like(pbn_image, 255, dtype=np.uint8)
+                bg_order, fg_order = [], []
+                for idx in per_color_order:
+                    if has_pixels(idx, bg_mask):
+                        bg_order.append(idx)
+                    if has_pixels(idx, fg_mask):
+                        fg_order.append(idx)
 
-                # Optional cumulative display of previously painted regions
-                if args.per_color_cumulative and args.prev_alpha > 0 and prev_mask.any():
-                    sel_prev = prev_mask
-                    white_f = 255.0
-                    prev_blend = ((1.0 - args.prev_alpha) * white_f +
-                                  args.prev_alpha * pbn_image[sel_prev].astype(np.float32)).round().astype(np.uint8)
-                    frame_rgb[sel_prev] = prev_blend
+                def render_pages(order, which_mask_name, which_mask):
+                    prev_mask = np.zeros((H, W), dtype=bool)
+                    for i in order:
+                        # pixels for this color restricted to which_mask
+                        curr_mask = np.logical_and(labels_full == i, which_mask)
 
-                # Current color regions
-                frame_rgb[curr_mask] = pbn_image[curr_mask]
+                        # skip empty
+                        if not curr_mask.any():
+                            continue
 
-                # Multiply blend with outline (if present)
-                if sketch_factor_rgb is not None:
-                    frame_f = np.clip(frame_rgb.astype(np.float32) / 255.0, 0.0, 1.0)
-                    composite = np.clip(frame_f * sketch_factor_rgb, 0.0, 1.0)
-                    composite_u8 = (composite * 255.0 + 0.5).astype(np.uint8)
-                else:
-                    composite_u8 = frame_rgb
+                        frame_rgb = np.full_like(pbn_image, 255, dtype=np.uint8)
 
-                # Grid overlay
-                frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
+                        # Optional cumulative display
+                        if args.per_color_cumulative and args.prev_alpha > 0 and prev_mask.any():
+                            sel_prev = prev_mask
+                            white_f = 255.0
+                            prev_blend = ((1.0 - args.prev_alpha) * white_f +
+                                          args.prev_alpha * pbn_image[sel_prev].astype(np.float32)).round().astype(
+                                np.uint8)
+                            frame_rgb[sel_prev] = prev_blend
 
-                # Page layout
-                fig = new_fig(A4_LANDSCAPE)
-                gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
-                axL = fig.add_subplot(gs[0, 0]);
-                axR = fig.add_subplot(gs[0, 1])
+                        # Current color regions (restricted to FG or BG)
+                        frame_rgb[curr_mask] = pbn_image[curr_mask]
 
-                axL.imshow(frame_with_grid)
-                axL.set_title((f"Per-Color • #{i + 1} + Grid "
-                               f"{'(cumulative, prevα=' + str(args.prev_alpha) + ')' if args.per_color_cumulative else ''} "
-                               f"{'(outline multiply underlay)' if sketch_factor_rgb is not None else ''}"), pad=2)
-                axL.axis("off")
+                        # Multiply blend with outline if present
+                        if sketch_factor_rgb is not None:
+                            frame_f = np.clip(frame_rgb.astype(np.float32) / 255.0, 0.0, 1.0)
+                            composite = np.clip(frame_f * sketch_factor_rgb, 0.0, 1.0)
+                            composite_u8 = (composite * 255.0 + 0.5).astype(np.uint8)
+                        else:
+                            composite_u8 = frame_rgb
 
-                # Right side: color key & neutral note
-                draw_color_key(
-                    axR, centroids, all_recipes, all_entries, BASE_PALETTE,
-                    used_indices=[i],
-                    title=f"Color Key • Color #{i + 1}",
-                    tweaks=tweaks,
-                    wrap_width=max(30, int(args.wrap * 0.7)),
-                    show_components=not args.hide_components,
-                    deltaEs=deltaEs,
-                    left_pad=1.25, right_margin=0.18, text_gap=0.05,
-                    approx_palette=approx_uint8
-                )
-                axR.text(0.05, 0.05, step_note_map.get(i, ""), fontsize=8, transform=axR.transAxes)
+                        frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
 
-                pdf.savefig(fig, dpi=300);
-                plt.close(fig)
+                        # Layout (same as yours)
+                        fig = new_fig((11.69, 8.27))
+                        gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
+                        axL = fig.add_subplot(gs[0, 0]);
+                        axR = fig.add_subplot(gs[0, 1])
 
-                # Update cumulative mask for next page
-                if args.per_color_cumulative:
-                    prev_mask |= curr_mask
-                else:
-                    prev_mask[:] = False
+                        axL.imshow(frame_with_grid)
+                        role = "Background" if which_mask_name == "bg" else "Foreground"
+                        axL.set_title((f"Per-Color • #{i + 1} ({role}) + Grid "
+                                       f"{'(cumulative, prevα=' + str(args.prev_alpha) + ')' if args.per_color_cumulative else ''} "
+                                       f"{'(outline multiply underlay)' if sketch_factor_rgb is not None else ''}"),
+                                      pad=2)
+                        axL.axis("off")
+
+                        draw_color_key(
+                            axR, centroids, all_recipes, all_entries, BASE_PALETTE,
+                            used_indices=[i],
+                            title=f"Color Key • Color #{i + 1} ({role})",
+                            tweaks=tweaks,
+                            wrap_width=max(30, int(args.wrap * 0.7)),
+                            show_components=not args.hide_components,
+                            deltaEs=deltaEs,
+                            left_pad=1.25, right_margin=0.18, text_gap=0.05,
+                            approx_palette=approx_uint8
+                        )
+                        axR.text(0.05, 0.05, f"Color #{i + 1}", fontsize=8, transform=axR.transAxes)
+
+                        pdf.savefig(fig, dpi=300);
+                        plt.close(fig)
+
+                        # Update cumulative mask for next page in this track
+                        if args.per_color_cumulative:
+                            prev_mask |= curr_mask
+                        else:
+                            prev_mask[:] = False
+
+                # First emit *background* pages in Stepwise order, then *foreground*
+                render_pages(bg_order, "bg", bg_mask)
+                render_pages(fg_order, "fg", fg_mask)
+
+            else:
+                # --- Original behavior (no split) ---
+                prev_mask = np.zeros((H, W), dtype=bool)
+                for i in per_color_order:
+                    curr_mask = (labels_full == i)
+                    frame_rgb = np.full_like(pbn_image, 255, dtype=np.uint8)
+
+                    if args.per_color_cumulative and args.prev_alpha > 0 and prev_mask.any():
+                        sel_prev = prev_mask
+                        white_f = 255.0
+                        prev_blend = ((1.0 - args.prev_alpha) * white_f +
+                                      args.prev_alpha * pbn_image[sel_prev].astype(np.float32)).round().astype(np.uint8)
+                        frame_rgb[sel_prev] = prev_blend
+
+                    frame_rgb[curr_mask] = pbn_image[curr_mask]
+
+                    if sketch_factor_rgb is not None:
+                        frame_f = np.clip(frame_rgb.astype(np.float32) / 255.0, 0.0, 1.0)
+                        composite = np.clip(frame_f * sketch_factor_rgb, 0.0, 1.0)
+                        composite_u8 = (composite * 255.0 + 0.5).astype(np.uint8)
+                    else:
+                        composite_u8 = frame_rgb
+
+                    frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
+
+                    fig = new_fig((11.69, 8.27))
+                    gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
+                    axL = fig.add_subplot(gs[0, 0]);
+                    axR = fig.add_subplot(gs[0, 1])
+
+                    axL.imshow(frame_with_grid)
+                    axL.set_title((f"Per-Color • #{i + 1} + Grid "
+                                   f"{'(cumulative, prevα=' + str(args.prev_alpha) + ')' if args.per_color_cumulative else ''} "
+                                   f"{'(outline multiply underlay)' if sketch_factor_rgb is not None else ''}"), pad=2)
+                    axL.axis("off")
+
+                    draw_color_key(
+                        axR, centroids, all_recipes, all_entries, BASE_PALETTE,
+                        used_indices=[i],
+                        title=f"Color Key • Color #{i + 1}",
+                        tweaks=tweaks,
+                        wrap_width=max(30, int(args.wrap * 0.7)),
+                        show_components=not args.hide_components,
+                        deltaEs=deltaEs,
+                        left_pad=1.25, right_margin=0.18, text_gap=0.05,
+                        approx_palette=approx_uint8
+                    )
+                    axR.text(0.05, 0.05, f"Color #{i + 1}", fontsize=8, transform=axR.transAxes)
+
+                    pdf.savefig(fig, dpi=300);
+                    plt.close(fig)
+
+                    if args.per_color_cumulative:
+                        prev_mask |= curr_mask
+                    else:
+                        prev_mask[:] = False
 
         # Final page
         completed_with_grid = add_grid_to_rgb(pbn_image, grid_step=args.grid_step, grid_color=200)
@@ -2199,6 +2344,12 @@ if __name__ == "__main__":
         # --- Canvas Dimensions ---
         "canvas_dimensions_mm": (240, 300),
         "imprimatura_mode": "match_light",  # or "complement_dominant" or "neutral_warm"
+        # --- Foreground/Background split (RMBG-2.0) ---
+        "separate_fg_bg": True,  # when True, Per-Color pages are split BG then FG
+        "rmbg_model_dir": "rmbg",  # local folder containing briaai/RMBG-2.0
+        "rmbg_device": None,  # "cuda" or "cpu" (auto if None)
+        "rmbg_alpha_threshold": 0.5,  # threshold on matte [0..1]
+        "rmbg_target_size": (1024, 1024),  # preprocess size for RMBG
     }
 
     main()
