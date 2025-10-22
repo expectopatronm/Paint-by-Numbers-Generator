@@ -131,3 +131,6 @@ dmypy.json
 *.iml
 data/
 .idea/
+
+# RMBG2.0+
+rmbg
