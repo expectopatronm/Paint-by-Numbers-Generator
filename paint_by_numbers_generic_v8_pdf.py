@@ -19,7 +19,6 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.gridspec import GridSpec
 from matplotlib.backends.backend_pdf import PdfPages
-from sklearn.cluster import KMeans
 import textwrap as _tw
 import colorsys
 import mixbox as _mixbox
@@ -27,6 +26,8 @@ import mixbox as _mixbox
 import svgwrite
 from skimage.morphology import skeletonize
 from skimage import measure
+from sklearn.cluster import KMeans
+from sklearn.mixture import BayesianGaussianMixture
 
 
 # Cache latents for speed
@@ -1570,7 +1571,7 @@ def main(config: dict | None = None):
     pixels_small = data_small.reshape((-1, 3)).astype(np.float32)
 
     # -------------------------
-    # Perceptual KMeans (Lab default)
+    # Clustering (KMeans or BGMM) in LAB or RGB
     # -------------------------
     if args.cluster_space == "lab":
         def rgbrow_to_labrows(arr_uint8):
@@ -1579,21 +1580,46 @@ def main(config: dict | None = None):
                 lab = rgb8_to_lab(np.array([r, g, b], dtype=np.float32))
                 labs.append(lab)
             return np.array(labs, dtype=np.float32)
+
         feats = rgbrow_to_labrows(pixels_small.astype(np.uint8))
     else:
         feats = pixels_small
 
-    kmeans = KMeans(n_clusters=args.colors, random_state=42, n_init=8)
-    kmeans.fit(feats)
-    labels_small = kmeans.labels_.reshape(Hs, Ws).astype(np.uint8)
+    if getattr(args, "cluster_algo", "kmeans") == "bgmm":
+        # Variational Bayesian GMM with Dirichlet Process prior (truncated stick-breaking)
+        # n_components is an **upper bound**; unused components get near-zero weight.
+        n_comp = int(max(2, args.colors))
+        bgmm = BayesianGaussianMixture(
+            n_components=n_comp,
+            covariance_type="full",
+            weight_concentration_prior_type="dirichlet_process",
+            init_params="kmeans",
+            random_state=42,
+            max_iter=300
+        ).fit(feats)
 
-    # Centroids in RGB
-    if args.cluster_space == "lab":
-        centroids_lab = kmeans.cluster_centers_.astype(np.float32)
-        centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
-        centroids = np.array(centroids_rgb, dtype=np.uint8)
+        labels_small = bgmm.predict(feats).reshape(Hs, Ws).astype(np.uint8)
+
+        # Centroids from model means
+        if args.cluster_space == "lab":
+            centroids_lab = bgmm.means_.astype(np.float32)
+            centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
+            centroids = np.array(centroids_rgb, dtype=np.uint8)
+        else:
+            centroids = np.clip(np.rint(bgmm.means_), 0, 255).astype(np.uint8)
+
     else:
-        centroids = np.clip(np.rint(kmeans.cluster_centers_), 0, 255).astype(np.uint8)
+        # Default: KMeans
+        kmeans = KMeans(n_clusters=args.colors, random_state=42, n_init=8)
+        kmeans.fit(feats)
+        labels_small = kmeans.labels_.reshape(Hs, Ws).astype(np.uint8)
+
+        if args.cluster_space == "lab":
+            centroids_lab = kmeans.cluster_centers_.astype(np.float32)
+            centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
+            centroids = np.array(centroids_rgb, dtype=np.uint8)
+        else:
+            centroids = np.clip(np.rint(kmeans.cluster_centers_), 0, 255).astype(np.uint8)
 
     # Upsample labels to full res
     labels_full = Image.fromarray(labels_small, mode="L").resize((orig_w, orig_h), resample=Image.NEAREST)
@@ -2110,11 +2136,12 @@ if __name__ == "__main__":
         "parallel": True,     # turn off to force single-core
         "workers": None,      # None = os.cpu_count(); or set an int
 
-        "input": "pics/4.jpg",  # was a required CLI arg; override as needed
+        "input": "pics/10.jpg",  # was a required CLI arg; override as needed
         "pdf": "paint_by_numbers_guide.pdf",
-        "colors": 30,
+        "colors": 35,
         "resize": None,  # e.g. (W, H)
         "cluster_space": "lab",  # {"lab","rgb"}
+        "cluster_algo": "kmeans",  # {"kmeans","bgmm"}
         "palette": list(BASE_PALETTE.keys()),
         "components": 5,
         "max_parts": 10,
@@ -2160,7 +2187,7 @@ if __name__ == "__main__":
         # --- Build-on graph (extra page) ---
         "build_graph_page": True,  # add a single neutral dependency-graph page
         # --- Optional pre-upscale with Real-ESRGAN ---
-        "enable_upscale": True,  # turn on/off the pre-upscale
+        "enable_upscale": False,  # turn on/off the pre-upscale
         "upscale_ok_min_long": 2500,  # if longest side >= this → no upscale
         "realesrgan_bin": "realesrgan-ncnn-vulkan-20220424-windows/realesrgan-ncnn-vulkan.exe",
         # (recommended) also add:
@@ -2168,7 +2195,7 @@ if __name__ == "__main__":
         "realesrgan_model_name": "realesrgan-x4plus", # matches your .bin/.param files
         "realesrgan_scale_choices": (2, 3, 4),  # allowed scale factors
         # --- Pre-brighten (applied AFTER upscaling, BEFORE analysis)
-        "pre_brighten_pct": 25, # 0 = no change; 1..100 = percentage increase in brightness
+        "pre_brighten_pct": 5, # 0 = no change; 1..100 = percentage increase in brightness
         # --- Canvas Dimensions ---
         "canvas_dimensions_mm": (240, 300),
         "imprimatura_mode": "match_light",  # or "complement_dominant" or "neutral_warm"
