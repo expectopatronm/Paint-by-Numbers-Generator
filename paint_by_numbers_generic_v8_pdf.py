@@ -1332,23 +1332,66 @@ def run_centerline_trace(args):
     Wmm, Hmm = float(dims[0]), float(dims[1])
 
     canvas_out = getattr(args, "centerline_canvas_output", None) or (
-        os.path.splitext(args.centerline_output)[0] + "_canvas.svg"
+            os.path.splitext(args.centerline_output)[0] + "_canvas.svg"
     )
 
     from svgwrite import Drawing
     dwg_mm = Drawing(canvas_out, size=(f"{Wmm}mm", f"{Hmm}mm"), viewBox=f"0 0 {Wmm} {Hmm}")
 
-    # Compute uniform scale that fits the pixel artwork (w×h) inside the page
-    # Scale by the same percentage in X and Y (no warping), then center.
-    s = min(Wmm / float(w), Hmm / float(h)) if (w > 0 and h > 0) else 1.0
-    tx = (Wmm - s * w) / 2.0
-    ty = (Hmm - s * h) / 2.0
+    # --- NEW: rotation (0 or 90 deg) on the canvas
+    rot = int(getattr(args, "canvas_rotation_deg", 0))
+    if rot not in (0, 90):
+        rot = 0  # clamp to safe values
 
-    # Everything (grid + centerlines) goes into one transformed group
-    root = dwg_mm.g(transform=f"translate({tx},{ty}) scale({s})")
+    # --- Margin on the longest side of the CANVAS (both ends)
+    long_margin = float(getattr(args, "canvas_long_margin_mm", 5.0))
+    long_margin = max(0.0, long_margin)
+    width_is_long = Wmm >= Hmm
 
-    # ---- redraw the ORIGINAL pixel-space grid so it scales together with the sketch
-    grid_step_px = int(getattr(args, "grid_step", 250))  # same step as pixel SVG
+    # Artwork size in pixels BEFORE rotation: (w × h)
+    # Effective bounding box AFTER rotation (in pixels)
+    W_art_px = w if rot == 0 else h
+    H_art_px = h if rot == 0 else w
+
+    # Available drawing area in mm (apply margin only to the longest canvas side)
+    if width_is_long:
+        avail_W = max(0.0, Wmm - 2.0 * long_margin)
+        avail_H = Hmm
+        offset_x_mm = long_margin
+        offset_y_mm = 0.0
+    else:
+        avail_W = Wmm
+        avail_H = max(0.0, Hmm - 2.0 * long_margin)
+        offset_x_mm = 0.0
+        offset_y_mm = long_margin
+
+    # Uniform scale to fit the (possibly rotated) artwork into available area
+    s = min(
+        avail_W / float(W_art_px) if W_art_px > 0 else 1.0,
+        avail_H / float(H_art_px) if H_art_px > 0 else 1.0
+    )
+
+    # Center INSIDE the available area
+    used_W = s * W_art_px
+    used_H = s * H_art_px
+    tx_inner = (avail_W - used_W) / 2.0
+    ty_inner = (avail_H - used_H) / 2.0
+
+    # Final translation (mm)
+    tx = offset_x_mm + tx_inner
+    ty = offset_y_mm + ty_inner
+
+    # Group transform:
+    # - For 0°: translate -> scale
+    # - For 90°: translate -> rotate(90) -> scale -> pre-translate(0, -h)
+    #   (Rightmost applies first; pre-translate keeps the rotated bbox in +X/+Y)
+    if rot == 0:
+        root = dwg_mm.g(transform=f"translate({tx},{ty}) scale({s})")
+    else:  # 90 degrees clockwise
+        root = dwg_mm.g(transform=f"translate({tx},{ty}) rotate(90) scale({s}) translate(0, {-h})")
+
+    # ---- redraw the ORIGINAL pixel-space grid so it scales (and rotates) together
+    grid_step_px = int(getattr(args, "grid_step", 250))
     grid_gray = int(getattr(args, "grid_color", 200))
     grid_hex = _gray_int_to_hex(grid_gray)
 
@@ -1362,19 +1405,18 @@ def run_centerline_trace(args):
             root.add(dwg_mm.line(start=(0, y), end=(w, y), stroke=grid_hex, stroke_width=0.5, opacity=0.7))
             y += grid_step_px
 
-    # ---- centerlines (pixel coords) go into the same group
+    # ---- centerlines (pixel coords) go into the same group so they share transforms
     for cnt in contours:
         pts = [(float(c[1]), float(c[0])) for c in cnt]
         if args.centerline_simplify > 0:
             epsilon = float(args.centerline_simplify)
             approx = cv2.approxPolyDP(np.array(pts, dtype=np.float32), epsilon, False)
             pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
-        # Stroke width scales with the group so grid + lines look consistent
         root.add(dwg_mm.polyline(points=pts, fill="none", stroke="black", stroke_width=0.1))
 
     dwg_mm.add(root)
     dwg_mm.save()
-    print(f"Centerline canvas SVG saved: {canvas_out} (paper {Wmm}×{Hmm} mm, uniform scale, centered)")
+    print(f"Centerline canvas SVG saved: {canvas_out} (paper {Wmm}×{Hmm} mm, s={s:.4f}, rot={rot}°)")
 
     # Optional: vpype optimization for the canvas file
     try:
@@ -2295,7 +2337,7 @@ if __name__ == "__main__":
         "wrap": 55,
         # in DEFAULT_CONFIG
         "grid_step": "auto",  # was 250
-        "grid_min_cols": 5,  # new: minimum boxes horizontally
+        "grid_min_cols": 7,  # new: minimum boxes horizontally
         "edge_percentile": 90.0,
         "hide_components": False,
         "per_color_frames": True,
@@ -2333,7 +2375,7 @@ if __name__ == "__main__":
         "build_graph_page": True,  # add a single neutral dependency-graph page
         # --- Optional pre-upscale with Real-ESRGAN ---
         "enable_upscale": False,  # turn on/off the pre-upscale
-        "upscale_ok_min_long": 2500,  # if longest side >= this → no upscale
+        "upscale_ok_min_long": 3000,  # if longest side >= this → no upscale
         "realesrgan_bin": "realesrgan-ncnn-vulkan-20220424-windows/realesrgan-ncnn-vulkan.exe",
         # (recommended) also add:
         "realesrgan_model_dir": "realesrgan-ncnn-vulkan-20220424-windows/models",
@@ -2341,8 +2383,10 @@ if __name__ == "__main__":
         "realesrgan_scale_choices": (2, 3, 4),  # allowed scale factors
         # --- Pre-brighten (applied AFTER upscaling, BEFORE analysis)
         "pre_brighten_pct": 5, # 0 = no change; 1..100 = percentage increase in brightness
-        # --- Canvas Dimensions ---
-        "canvas_dimensions_mm": (240, 300),
+        # --- Canvas Dimensions & Margins ---
+        "canvas_dimensions_mm": (300, 400), # (width, height) in mm
+        "canvas_long_margin_mm": 10.0,  # margin on BOTH ends of the longest canvas side
+        "canvas_rotation_deg": 90,  # NEW: 0 or 90 (rotation when laying out on canvas)
         "imprimatura_mode": "match_light",  # or "complement_dominant" or "neutral_warm"
         # --- Foreground/Background split (RMBG-2.0) ---
         "separate_fg_bg": True,  # when True, Per-Color pages are split BG then FG
