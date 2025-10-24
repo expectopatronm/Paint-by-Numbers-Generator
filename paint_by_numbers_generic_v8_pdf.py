@@ -2386,12 +2386,12 @@ if __name__ == "__main__":
         # --- Canvas Dimensions & Margins ---
         "canvas_dimensions_mm": (300, 400), # (width, height) in mm
         "canvas_long_margin_mm": 10.0,  # margin on BOTH ends of the longest canvas side
-        "canvas_rotation_deg": 90,  # NEW: 0 or 90 (rotation when laying out on canvas)
+        "canvas_rotation_deg": 0,  # NEW: 0 or 90 (rotation when laying out on canvas)
         "imprimatura_mode": "match_light",  # or "complement_dominant" or "neutral_warm"
         # --- Foreground/Background split (RMBG-2.0) ---
         "separate_fg_bg": True,  # when True, Per-Color pages are split BG then FG
         "rmbg_model_dir": "rmbg",  # local folder containing briaai/RMBG-2.0
-        "rmbg_device": None,  # "cuda" or "cpu" (auto if None)
+        "rmbg_device": "cuda",  # "cuda" or "cpu" (auto if None)
         "rmbg_alpha_threshold": 0.5,  # threshold on matte [0..1]
         "rmbg_target_size": (1024, 1024),  # preprocess size for RMBG
     }
