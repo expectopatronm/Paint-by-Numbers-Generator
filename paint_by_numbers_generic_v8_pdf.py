@@ -1491,6 +1491,22 @@ def _map_pre_brighten_pct_to_factor(pct: float) -> float:
     return 1.0 + (p / 100.0)
 
 
+def _prev_highlight_rgb(args) -> np.ndarray | None:
+    """
+    Returns an RGB uint8 color for highlighting previous regions,
+    or None to keep the existing 'use original colors' behavior.
+    """
+    mode = str(getattr(args, "prev_highlight_mode", "none")).lower()
+    if mode == "neon_orange":
+        return np.array([255, 90, 0], dtype=np.uint8)      # bright neon orange
+    if mode == "neon_green":
+        return np.array([57, 255, 20], dtype=np.uint8)     # bright neon green
+    if mode == "custom":
+        rgb = getattr(args, "prev_highlight_rgb", (255, 90, 0))
+        return np.clip(np.array(rgb, dtype=np.int32), 0, 255).astype(np.uint8)
+    return None
+
+
 # ---------------------------
 # Image-aware Imprimatura selection
 # ---------------------------
@@ -2107,8 +2123,10 @@ def main(config: dict | None = None):
                     if has_pixels(idx, fg_mask):
                         fg_order.append(idx)
 
-                def render_pages(order, which_mask_name, which_mask):
-                    prev_mask = np.zeros((H, W), dtype=bool)
+                def render_pages(order, which_mask_name, which_mask, seed_prev_mask=None):
+                    prev_mask = (seed_prev_mask.copy()
+                                 if seed_prev_mask is not None
+                                 else np.zeros((H, W), dtype=bool))
                     for i in order:
                         # pixels for this color restricted to which_mask
                         curr_mask = np.logical_and(labels_full == i, which_mask)
@@ -2119,14 +2137,21 @@ def main(config: dict | None = None):
 
                         frame_rgb = np.full_like(pbn_image, 255, dtype=np.uint8)
 
-                        # Optional cumulative display
+                        # Optional cumulative display (includes seeded BG if provided)
                         if args.per_color_cumulative and args.prev_alpha > 0 and prev_mask.any():
                             sel_prev = prev_mask
+                            hl = _prev_highlight_rgb(args)
+                            alpha = float(getattr(args, "prev_alpha", 0.50))
                             white_f = 255.0
-                            prev_blend = ((1.0 - args.prev_alpha) * white_f +
-                                          args.prev_alpha * pbn_image[sel_prev].astype(np.float32)).round().astype(
-                                np.uint8)
-                            frame_rgb[sel_prev] = prev_blend
+
+                            if hl is not None:
+                                frame_rgb[sel_prev] = (
+                                        (1.0 - alpha) * white_f + alpha * hl.astype(np.float32)
+                                ).round().astype(np.uint8)
+                            else:
+                                frame_rgb[sel_prev] = (
+                                        (1.0 - alpha) * white_f + alpha * pbn_image[sel_prev].astype(np.float32)
+                                ).round().astype(np.uint8)
 
                         # Current color regions (restricted to FG or BG)
                         frame_rgb[curr_mask] = pbn_image[curr_mask]
@@ -2141,7 +2166,7 @@ def main(config: dict | None = None):
 
                         frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
 
-                        # Layout (same as yours)
+                        # Layout
                         fig = new_fig((11.69, 8.27))
                         gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
                         axL = fig.add_subplot(gs[0, 0]);
@@ -2149,10 +2174,12 @@ def main(config: dict | None = None):
 
                         axL.imshow(frame_with_grid)
                         role = "Background" if which_mask_name == "bg" else "Foreground"
-                        axL.set_title((f"Per-Color • #{i + 1} ({role}) + Grid "
-                                       f"{'(cumulative, prevα=' + str(args.prev_alpha) + ')' if args.per_color_cumulative else ''} "
-                                       f"{'(outline multiply underlay)' if sketch_factor_rgb is not None else ''}"),
-                                      pad=2)
+                        axL.set_title(
+                            (f"Per-Color • #{i + 1} ({role}) + Grid "
+                             f"{'(cumulative, prevα=' + str(args.prev_alpha) + ')' if args.per_color_cumulative else ''} "
+                             f"{'(outline multiply underlay)' if sketch_factor_rgb is not None else ''}"),
+                            pad=2
+                        )
                         axL.axis("off")
 
                         draw_color_key(
@@ -2168,7 +2195,7 @@ def main(config: dict | None = None):
                         )
                         axR.text(0.05, 0.05, f"Color #{i + 1}", fontsize=8, transform=axR.transAxes)
 
-                        pdf.savefig(fig, dpi=300);
+                        pdf.savefig(fig, dpi=300)
                         plt.close(fig)
 
                         # Update cumulative mask for next page in this track
@@ -2177,9 +2204,15 @@ def main(config: dict | None = None):
                         else:
                             prev_mask[:] = False
 
-                # First emit *background* pages in Stepwise order, then *foreground*
-                render_pages(bg_order, "bg", bg_mask)
-                render_pages(fg_order, "fg", fg_mask)
+                    # hand back whatever we've accumulated (so BG can seed FG)
+                    return prev_mask
+
+                # First emit *background* pages and capture their cumulative mask
+                bg_cumulative = render_pages(bg_order, "bg", bg_mask)
+
+                # Then emit *foreground* pages, including all background done so far
+                render_pages(fg_order, "fg", fg_mask, seed_prev_mask=bg_cumulative)
+
 
             else:
                 # --- Original behavior (no split) ---
@@ -2190,10 +2223,21 @@ def main(config: dict | None = None):
 
                     if args.per_color_cumulative and args.prev_alpha > 0 and prev_mask.any():
                         sel_prev = prev_mask
+                        hl = _prev_highlight_rgb(args)
+                        alpha = float(getattr(args, "prev_alpha", 0.50))
                         white_f = 255.0
-                        prev_blend = ((1.0 - args.prev_alpha) * white_f +
-                                      args.prev_alpha * pbn_image[sel_prev].astype(np.float32)).round().astype(np.uint8)
-                        frame_rgb[sel_prev] = prev_blend
+
+                        if hl is not None:
+                            # Blend WHITE with the chosen neon highlight color, not with original colors
+                            # (shape-broadcasting works because sel_prev masks a Nx3 view)
+                            frame_rgb[sel_prev] = (
+                                    (1.0 - alpha) * white_f + alpha * hl.astype(np.float32)
+                            ).round().astype(np.uint8)
+                        else:
+                            # Original behavior: blend WHITE with the previous regions' original colors
+                            frame_rgb[sel_prev] = (
+                                    (1.0 - alpha) * white_f + alpha * pbn_image[sel_prev].astype(np.float32)
+                            ).round().astype(np.uint8)
 
                     frame_rgb[curr_mask] = pbn_image[curr_mask]
 
@@ -2341,9 +2385,11 @@ if __name__ == "__main__":
         "edge_percentile": 90.0,
         "hide_components": False,
         "per_color_frames": True,
-        "sketch_alpha": 0.55,
+        "sketch_alpha": 0.25,
         "per_color_cumulative": True,
-        "prev_alpha": 0.50,
+        "prev_alpha": 0.10,
+        "prev_highlight_mode": "neon_green",       # {"none","neon_orange","neon_green","custom"}
+        "prev_highlight_rgb": (255, 90, 0),  # used when prev_highlight_mode=="custom"
         "min_region_px": 0,
         "min_region_pct": 0.0,
         "outline_mode": "image",  # {"image","labels","both"}
