@@ -46,13 +46,15 @@ def _latent_for_rgb_u8(rgb_u8) -> list[float]:
         _MIXBOX_LATENTS[key] = z
     return z
 
-def mix_learned(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
+# add base_names so you *could* do per-pigment tweaks later if you like
+def mix_learned(parts: np.ndarray,
+                base_rgbs: np.ndarray,
+                base_names: Sequence[str] | None = None,
+                *,
+                darken_factor: float = 0.9) -> np.ndarray:
     """
-    Mix N colors exactly as documented by Mixbox:
-    - convert RGB -> latent
-    - weighted average latents
-    - latent -> RGB
-    Returns sRGB uint8 floats (0..255).
+    Mix colors in Mixbox latent space, then apply a global darkening
+    to better match real oil-paint mixtures (which tend to dry darker).
     """
     parts = np.asarray(parts, dtype=float)
     if parts.sum() <= 0:
@@ -71,8 +73,17 @@ def mix_learned(parts: np.ndarray, base_rgbs: np.ndarray) -> np.ndarray:
             for i in range(len(z_mix)):
                 z_mix[i] += wi * zi[i]
 
-    r, g, b = _mixbox.latent_to_rgb(z_mix)  # uint8s
-    return np.array([float(r), float(g), float(b)], dtype=float)
+    r, g, b = _mixbox.latent_to_rgb(z_mix)  # uint8-like
+    rgb = np.array([int(r), int(g), int(b)], dtype=int)
+
+    # --- NEW: “oil calibration” darken ---
+    # factor < 1.0 → darker model → recipes add more white in search
+    if darken_factor is not None:
+        rgb = np.array(darken_srgb(rgb, factor=darken_factor), dtype=float)
+    else:
+        rgb = rgb.astype(float)
+
+    return rgb
 
 
 def rmbg_alpha_matte(input_path: str,
@@ -664,8 +675,8 @@ def mix_color(parts: np.ndarray,
     """
     if model == "km":
         return mix_km_strength(parts, base_rgbs, base_names)
-    elif model == "learned":                      # <--- NEW
-        return mix_learned(parts, base_rgbs)
+    elif model == "learned":
+        return mix_learned(parts, base_rgbs, base_names)
 
 # ---------------------------
 # Recipe enumeration / search
@@ -1670,24 +1681,33 @@ def main(config: dict | None = None):
         img_small = img.resize((Wc, Hc), resample=Image.BILINEAR)
     else:
         img_small = img.copy()
+
     data_small = np.array(img_small)
     Hs, Ws, _ = data_small.shape
     pixels_small = data_small.reshape((-1, 3)).astype(np.float32)
+
+    # Normalized XY coordinates
+    ys, xs = np.indices((Hs, Ws))
+    xs = xs.astype(np.float32).reshape(-1, 1) / Ws
+    ys = ys.astype(np.float32).reshape(-1, 1) / Hs
+
+    def rgbrow_to_labrows(arr_uint8):
+        labs = []
+        for r, g, b in arr_uint8:
+            lab = rgb8_to_lab(np.array([r, g, b], dtype=np.float32))
+            labs.append(lab)
+        return np.array(labs, dtype=np.float32)
 
     # -------------------------
     # Clustering (KMeans or BGMM) in LAB or RGB
     # -------------------------
     if args.cluster_space == "lab":
-        def rgbrow_to_labrows(arr_uint8):
-            labs = []
-            for r, g, b in arr_uint8:
-                lab = rgb8_to_lab(np.array([r, g, b], dtype=np.float32))
-                labs.append(lab)
-            return np.array(labs, dtype=np.float32)
-
-        feats = rgbrow_to_labrows(pixels_small.astype(np.uint8))
+        color_feats = rgbrow_to_labrows(pixels_small.astype(np.uint8))
     else:
-        feats = pixels_small
+        color_feats = pixels_small
+
+    lambda_xy = 0.3  # tune: higher = more spatial cohesion, fewer weird speckles
+    feats = np.hstack([color_feats, lambda_xy * xs, lambda_xy * ys])
 
     if getattr(args, "cluster_algo", "kmeans") == "bgmm":
         # Variational Bayesian GMM with Dirichlet Process prior (truncated stick-breaking)
@@ -1706,7 +1726,7 @@ def main(config: dict | None = None):
 
         # Centroids from model means
         if args.cluster_space == "lab":
-            centroids_lab = bgmm.means_.astype(np.float32)
+            centroids_lab = bgmm.means_[:, :3].astype(np.float32)
             centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
             centroids = np.array(centroids_rgb, dtype=np.uint8)
         else:
@@ -1716,10 +1736,12 @@ def main(config: dict | None = None):
         # Default: KMeans
         kmeans = KMeans(n_clusters=args.colors, random_state=42, n_init=8)
         kmeans.fit(feats)
+
         labels_small = kmeans.labels_.reshape(Hs, Ws).astype(np.uint8)
 
         if args.cluster_space == "lab":
-            centroids_lab = kmeans.cluster_centers_.astype(np.float32)
+            # centers live in (L,a,b,xy,edge,...) space now → take only first 3 dims
+            centroids_lab = kmeans.cluster_centers_[:, :3].astype(np.float32)
             centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
             centroids = np.array(centroids_rgb, dtype=np.uint8)
         else:
@@ -2377,12 +2399,6 @@ if __name__ == "__main__":
         "Burnt Umber": 1.0,
         "Burnt Sienna": 0.8,
     }
-    # DARK_FACTOR = 1.0 # tweak this
-    #
-    # BASE_PALETTE = {
-    #     name: darken_srgb(rgb, factor=DARK_FACTOR)
-    #     for name, rgb in BASE_PALETTE.items()
-    # }
 
     # ---------------------------
     # Main CLI
@@ -2400,7 +2416,7 @@ if __name__ == "__main__":
         "cluster_space": "lab",  # {"lab","rgb"}
         "cluster_algo": "kmeans",  # {"kmeans","bgmm"}
         "palette": list(BASE_PALETTE.keys()),
-        "components": 3,
+        "components": 5,
         "max_parts": 10,
         "mix_model": "learned",  # {"km","learned"}
         "frame_mode": "combined",  # {"classic","value5","both","combined"}
