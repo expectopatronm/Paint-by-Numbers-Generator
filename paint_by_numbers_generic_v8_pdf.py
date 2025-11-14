@@ -1681,33 +1681,24 @@ def main(config: dict | None = None):
         img_small = img.resize((Wc, Hc), resample=Image.BILINEAR)
     else:
         img_small = img.copy()
-
     data_small = np.array(img_small)
     Hs, Ws, _ = data_small.shape
     pixels_small = data_small.reshape((-1, 3)).astype(np.float32)
-
-    # Normalized XY coordinates
-    ys, xs = np.indices((Hs, Ws))
-    xs = xs.astype(np.float32).reshape(-1, 1) / Ws
-    ys = ys.astype(np.float32).reshape(-1, 1) / Hs
-
-    def rgbrow_to_labrows(arr_uint8):
-        labs = []
-        for r, g, b in arr_uint8:
-            lab = rgb8_to_lab(np.array([r, g, b], dtype=np.float32))
-            labs.append(lab)
-        return np.array(labs, dtype=np.float32)
 
     # -------------------------
     # Clustering (KMeans or BGMM) in LAB or RGB
     # -------------------------
     if args.cluster_space == "lab":
-        color_feats = rgbrow_to_labrows(pixels_small.astype(np.uint8))
-    else:
-        color_feats = pixels_small
+        def rgbrow_to_labrows(arr_uint8):
+            labs = []
+            for r, g, b in arr_uint8:
+                lab = rgb8_to_lab(np.array([r, g, b], dtype=np.float32))
+                labs.append(lab)
+            return np.array(labs, dtype=np.float32)
 
-    lambda_xy = 0.3  # tune: higher = more spatial cohesion, fewer weird speckles
-    feats = np.hstack([color_feats, lambda_xy * xs, lambda_xy * ys])
+        feats = rgbrow_to_labrows(pixels_small.astype(np.uint8))
+    else:
+        feats = pixels_small
 
     if getattr(args, "cluster_algo", "kmeans") == "bgmm":
         # Variational Bayesian GMM with Dirichlet Process prior (truncated stick-breaking)
@@ -1726,7 +1717,7 @@ def main(config: dict | None = None):
 
         # Centroids from model means
         if args.cluster_space == "lab":
-            centroids_lab = bgmm.means_[:, :3].astype(np.float32)
+            centroids_lab = bgmm.means_.astype(np.float32)
             centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
             centroids = np.array(centroids_rgb, dtype=np.uint8)
         else:
@@ -1736,12 +1727,10 @@ def main(config: dict | None = None):
         # Default: KMeans
         kmeans = KMeans(n_clusters=args.colors, random_state=42, n_init=8)
         kmeans.fit(feats)
-
         labels_small = kmeans.labels_.reshape(Hs, Ws).astype(np.uint8)
 
         if args.cluster_space == "lab":
-            # centers live in (L,a,b,xy,edge,...) space now → take only first 3 dims
-            centroids_lab = kmeans.cluster_centers_[:, :3].astype(np.float32)
+            centroids_lab = kmeans.cluster_centers_.astype(np.float32)
             centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
             centroids = np.array(centroids_rgb, dtype=np.uint8)
         else:
