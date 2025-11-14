@@ -2017,8 +2017,7 @@ def main(config: dict | None = None):
                 # Legacy behavior (no clean stencil): keep the old special page for image-edges;
                 # otherwise show the raw outline/combined outline.
                 if args.outline_mode == "image":
-                    legacy_page = original_edge_sketch_with_grid(
-                        img_outline, grid_step=args.grid_step, grid_color=200,
+                    legacy_page = original_edge_sketch_with_grid(            img_outline, grid_step=args.grid_step, grid_color=200,
                         canny_high_pct=float(args.edge_percentile)
                     )
 
@@ -2303,32 +2302,55 @@ def main(config: dict | None = None):
     print(f"Total time: {elapsed:.2f}s")
 
 
+def darken_srgb(rgb, factor=0.8, gamma=2.2):
+    """
+    Darkens an sRGB color by scaling its linear light values.
+    factor < 1.0 makes it darker.
+    """
+    import math
+
+    def to_linear(c):
+        # c in [0,1] approximate sRGB -> linear
+        return c ** gamma
+
+    def to_srgb(c_lin):
+        c_lin = max(0.0, min(1.0, c_lin))
+        return c_lin ** (1.0 / gamma)
+
+    # 0–255 -> 0–1
+    r, g, b = [c / 255.0 for c in rgb]
+
+    # to linear light
+    r_lin, g_lin, b_lin = map(to_linear, (r, g, b))
+
+    # scale brightness
+    r_lin *= factor
+    g_lin *= factor
+    b_lin *= factor
+
+    # back to sRGB 0–255
+    r2, g2, b2 = [int(round(to_srgb(c) * 255)) for c in (r_lin, g_lin, b_lin)]
+    return r2, g2, b2
+
+
 if __name__ == "__main__":
 
     # ---------------------------
     # Base tube pigment palette
     # ---------------------------
     BASE_PALETTE = {
-        # Existing colors
-        "Titanium White": (218, 220, 224),
-        # "Lemon Yellow": (232, 206, 6),
-        # "Vermillion Red": (231, 44, 75),
-        # "Carmine": (213, 14, 33),
-        # "Ultramarine": (39, 51, 115),
-        # "Pthalo Green": (4, 95, 94),
-        # "Lamp Black": (24, 14, 19),
-
-        # New Schmincke Norma colors
-        "Yellow Ochre": (226, 145, 0),
-        "Cobalt Blue Hue": (1, 44, 145),  # mid-value, cooler than Ultramarine
-        "Payne's Grey": (39, 39, 41),  # deep bluish-grey
-        "Ivory Black": (7, 6, 2),  # slightly warmer than Lamp Black
-        "Indian Yellow": (248, 158, 4),  # transparent orange-yellow
-        "Alizarin Crimson Hue": (167, 1, 13),  # deep cool red
-        "Vandyke Brown": (15, 11, 7),  # dark warm brown
-        "Olive Green": (66, 81, 28),  # muted earthy green
-        "Burnt Umber": (86, 66, 48),
-        "Burnt Sienna": (121, 66, 50),
+        "alizarin_crimson": (82, 17, 28),
+        "burnt_sienna": (86, 35, 33),
+        "burnt_umber": (44, 28, 22),
+        "cobalt_blue": (36, 42, 85),
+        "indian_yellow": (219, 125, 21),
+        "indigo": (14, 17, 33),
+        "ivory_black": (15, 18, 22),
+        "olive_green": (73, 88, 37),
+        "paynes_gray": (13, 20, 25),
+        "titanium_white": (247, 247, 241),
+        "vandyke_brown": (27, 20, 13),
+        "yellow_ochre": (187, 128, 35)
     }
 
     # Tinting strength multipliers: how strongly each pigment “tints” per unit part.
@@ -2355,8 +2377,12 @@ if __name__ == "__main__":
         "Burnt Umber": 1.0,
         "Burnt Sienna": 0.8,
     }
-    BASE_PALETTE = BASE_PALETTE  # assign the local dict to the module global
-    STRENGTH = STRENGTH
+    # DARK_FACTOR = 1.0 # tweak this
+    #
+    # BASE_PALETTE = {
+    #     name: darken_srgb(rgb, factor=DARK_FACTOR)
+    #     for name, rgb in BASE_PALETTE.items()
+    # }
 
     # ---------------------------
     # Main CLI
@@ -2374,7 +2400,7 @@ if __name__ == "__main__":
         "cluster_space": "lab",  # {"lab","rgb"}
         "cluster_algo": "kmeans",  # {"kmeans","bgmm"}
         "palette": list(BASE_PALETTE.keys()),
-        "components": 5,
+        "components": 3,
         "max_parts": 10,
         "mix_model": "learned",  # {"km","learned"}
         "frame_mode": "combined",  # {"classic","value5","both","combined"}
