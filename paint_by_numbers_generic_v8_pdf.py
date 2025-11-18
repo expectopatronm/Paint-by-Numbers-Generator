@@ -2376,20 +2376,33 @@ if __name__ == "__main__":
         "yellow_ochre": (187, 128, 35)
     }
 
-    # How much each tube tends to dry darker (<1 = darker, 1 = no change, >1 = lighter)
+    # Dark earths + blacks (burnt_sienna, burnt_umber, ivory_black, paynes_gray, vandyke_brown) at 0.75:
+    # These will reliably make mixes dry darker.
+    # Using them heavily will overshoot into darkness unless balanced with white.
+    # Strong chromatic colors (alizarin_crimson, cobalt_blue, indian_yellow, olive_green, yellow_ochre) at 1.0:
+    # These don’t add extra darkening or lightening in your model.
+    # They behave like “honest citizens” in terms of value.
+    # Titanium white at 1.25:
+    # Acts as a stabilizer and lightener in the drying model.
+    # Makes white a powerful tool for keeping mixes from sinking into too much darkness.
+    # Indirectly encourages “use a bit more white” in recipes that need accurate dry values.
+    # So from a “real painter” perspective, your numbers encode this story:
+    # Dark earths and blacks: be careful, they dry darker than they look.
+    # Most strong hues and midtones: what you see wet is roughly what you get dry (value-wise).
+    # White: reliable, even a bit of a life-saver—if in doubt, a little more white will help your dry value not collapse into darkness.
     DARKEN_PER_PIGMENT = {
-        "alizarin_crimson": 0.75,
-        "burnt_sienna": 0.75,
-        "burnt_umber": 0.75,
+        "titanium_white": 1.25,
+        "alizarin_crimson": 1.0,
         "cobalt_blue": 1.0,
         "indian_yellow": 1.0,
-        # "indigo": 0.90,
-        "ivory_black": 0.75,
         "olive_green": 1.0,
+        "yellow_ochre": 1.0,
+        "burnt_sienna": 0.75,
+        "burnt_umber": 0.75,
+        # "indigo": 0.75,
+        "ivory_black": 0.75,
         "paynes_gray": 0.75,
-        "titanium_white": 1.25,
         "vandyke_brown": 0.75,
-        "yellow_ochre": 0.75,
     }
 
     # Tinting strength multipliers: how strongly each pigment “tints” per unit part.
