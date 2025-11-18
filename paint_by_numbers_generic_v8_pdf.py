@@ -2387,7 +2387,7 @@ if __name__ == "__main__":
         "ivory_black": 0.75,
         "olive_green": 1.0,
         "paynes_gray": 0.75,
-        "titanium_white": 0.75,
+        "titanium_white": 1.25,
         "vandyke_brown": 0.75,
         "yellow_ochre": 0.75,
     }
