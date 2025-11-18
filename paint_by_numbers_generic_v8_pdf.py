@@ -46,22 +46,27 @@ def _latent_for_rgb_u8(rgb_u8) -> list[float]:
         _MIXBOX_LATENTS[key] = z
     return z
 
-# add base_names so you *could* do per-pigment tweaks later if you like
+
 def mix_learned(parts: np.ndarray,
                 base_rgbs: np.ndarray,
-                base_names: Sequence[str] | None = None,
-                *,
-                darken_factor: float = 0.9) -> np.ndarray:
+                base_names: Sequence[str] | None = None) -> np.ndarray:
     """
-    Mix colors in Mixbox latent space, then apply a global darkening
+    Mix colors in Mixbox latent space, then apply a per-pigment darkening
     to better match real oil-paint mixtures (which tend to dry darker).
+
+    Darkening is controlled ONLY by DARKEN_PER_PIGMENT:
+      - If base_names is given, we compute a weighted per-pigment factor.
+      - If a pigment is missing from the dict, it defaults to 1.0 (no change).
+      - If base_names is None, no darkening is applied.
     """
     parts = np.asarray(parts, dtype=float)
     if parts.sum() <= 0:
         return base_rgbs[0].astype(float)
 
+    # normalized weights for each tube in this mix
     w = parts / parts.sum()
 
+    # --- Mix in Mixbox latent space ---
     z_mix = None
     for wi, rgb in zip(w, base_rgbs):
         if wi <= 0:
@@ -76,10 +81,17 @@ def mix_learned(parts: np.ndarray,
     r, g, b = _mixbox.latent_to_rgb(z_mix)  # uint8-like
     rgb = np.array([int(r), int(g), int(b)], dtype=int)
 
-    # --- NEW: “oil calibration” darken ---
-    # factor < 1.0 → darker model → recipes add more white in search
-    if darken_factor is not None:
-        rgb = np.array(darken_srgb(rgb, factor=darken_factor), dtype=float)
+    # --- Per-pigment darkening factor ---
+    if base_names is not None:
+        # Weighted average of per-pigment factors
+        factors = np.array([DARKEN_PER_PIGMENT.get(name, 1.0) for name in base_names],
+                           dtype=float)
+        eff_factor = float(np.sum(w * factors))
+    else:
+        eff_factor = 1.0  # no info → don't touch the value
+
+    if abs(eff_factor - 1.0) > 1e-6:
+        rgb = np.array(darken_srgb(rgb, factor=eff_factor), dtype=float)
     else:
         rgb = rgb.astype(float)
 
@@ -2355,13 +2367,29 @@ if __name__ == "__main__":
         "burnt_umber": (44, 28, 22),
         "cobalt_blue": (36, 42, 85),
         "indian_yellow": (219, 125, 21),
-        "indigo": (14, 17, 33),
+        # "indigo": (14, 17, 33),
         "ivory_black": (15, 18, 22),
         "olive_green": (73, 88, 37),
         "paynes_gray": (13, 20, 25),
         "titanium_white": (247, 247, 241),
         "vandyke_brown": (27, 20, 13),
         "yellow_ochre": (187, 128, 35)
+    }
+
+    # How much each tube tends to dry darker (<1 = darker, 1 = no change, >1 = lighter)
+    DARKEN_PER_PIGMENT = {
+        "alizarin_crimson": 0.75,
+        "burnt_sienna": 0.75,
+        "burnt_umber": 0.75,
+        "cobalt_blue": 1.0,
+        "indian_yellow": 1.0,
+        # "indigo": 0.90,
+        "ivory_black": 0.75,
+        "olive_green": 1.0,
+        "paynes_gray": 0.75,
+        "titanium_white": 0.75,
+        "vandyke_brown": 0.75,
+        "yellow_ochre": 0.75,
     }
 
     # Tinting strength multipliers: how strongly each pigment “tints” per unit part.
