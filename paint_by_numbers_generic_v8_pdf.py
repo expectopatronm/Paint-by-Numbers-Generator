@@ -2391,7 +2391,7 @@ if __name__ == "__main__":
     # Most strong hues and midtones: what you see wet is roughly what you get dry (value-wise).
     # White: reliable, even a bit of a life-saver—if in doubt, a little more white will help your dry value not collapse into darkness.
     DARKEN_PER_PIGMENT = {
-        "titanium_white": 1.25,
+        "titanium_white": 1.0,
         "alizarin_crimson": 1.0,
         "cobalt_blue": 1.0,
         "indian_yellow": 1.0,
