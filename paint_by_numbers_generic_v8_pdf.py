@@ -15,7 +15,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import cv2
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageOps
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.gridspec import GridSpec
@@ -113,7 +113,8 @@ def rmbg_alpha_matte(input_path: str,
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    img = Image.open(input_path).convert("RGB")
+    img = Image.open(input_path)
+    img = ImageOps.exif_transpose(img).convert("RGB")
     orig_w, orig_h = img.size
 
     # Load processor & model (trust_remote_code per model card)
@@ -1747,7 +1748,8 @@ def main(config: dict | None = None):
     # -------------------------
     # Load twice: one for OUTLINE (no pre-brighten), one for COLORING (pre-brighten)
     # -------------------------
-    img_outline = Image.open(args.input).convert("RGB")  # upscaled (if enabled), NOT pre-brightened
+    img_outline = Image.open(args.input)  # upscaled (if enabled), NOT pre-brightened
+    img_outline = ImageOps.exif_transpose(img_outline).convert("RGB")
     img = img_outline.copy()  # this copy will be pre-brightened for clustering/coloring
 
     # --- PRE-BRIGHTEN: apply a 0..100% increase (mapped to factor 1.00..2.00)
@@ -2570,7 +2572,7 @@ if __name__ == "__main__":
         #   - Can be overridden per-call via config.
         # pdf:
         #   - Output filename for the multi-page A4 landscape PDF guide.
-        "input": "pics/9.jpg",
+        "input": "pics/3.jpg",
         "pdf": "paint_by_numbers_guide.pdf",
         # ------------------------------------------------------------------
         # 3) CANVAS GEOMETRY & PRINT LAYOUT (FOR CENTERLINE SVG CANVAS)
@@ -2621,7 +2623,7 @@ if __name__ == "__main__":
         #     "kmeans" → standard KMeans on features.
         #     "bgmm"   → Bayesian Gaussian Mixture Model with a Dirichlet
         #                Process prior (effective cluster count may be < colors).
-        "colors": 35,
+        "colors": 30,
         "resize": None,  # e.g. (W, H)
         "cluster_space": "lab",  # {"lab", "rgb"}
         "cluster_algo": "kmeans",  # {"kmeans", "bgmm"}
