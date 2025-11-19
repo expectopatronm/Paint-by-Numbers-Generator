@@ -8,6 +8,7 @@ import subprocess
 import itertools
 from types import SimpleNamespace
 from typing import Dict, List, Sequence, Tuple
+from collections import deque
 from dataclasses import dataclass
 from functools import lru_cache
 from concurrent.futures import ProcessPoolExecutor
@@ -916,6 +917,101 @@ def group_value5_exclusive(palette: np.ndarray) -> Dict[str, List[int]]:
     return {"deep": deep, "core": core, "mids": mids, "half": half, "highs": highs}
 
 
+def adjacent_rings_by_value(labels_full: np.ndarray,
+                            approx_palette: np.ndarray) -> List[List[int]]:
+    """
+    Group colors into adjacency-based 'rings' from outer → inner, and
+    sort each ring dark → light.
+
+    - Adjacency priority: rings are BFS layers from the image border in the
+      label adjacency graph.
+    - Dark→light: within each ring we sort by relative luminance ascending.
+    """
+    H, W = labels_full.shape
+    C = approx_palette.shape[0]
+
+    # --- Build adjacency graph between labels (4-neighborhood) ---
+    adj: List[set[int]] = [set() for _ in range(C)]
+
+    # vertical neighbors
+    for y in range(H - 1):
+        row = labels_full[y]
+        next_row = labels_full[y + 1]
+        diff = (row != next_row)
+        if not diff.any():
+            continue
+        xs = np.where(diff)[0]
+        for x in xs:
+            a = int(row[x])
+            b = int(next_row[x])
+            if a == b:
+                continue
+            adj[a].add(b)
+            adj[b].add(a)
+
+    # horizontal neighbors
+    for y in range(H):
+        row = labels_full[y]
+        diff = (row[:-1] != row[1:])
+        if not diff.any():
+            continue
+        xs = np.where(diff)[0]
+        for x in xs:
+            a = int(row[x])
+            b = int(row[x + 1])
+            if a == b:
+                continue
+            adj[a].add(b)
+            adj[b].add(a)
+
+    # --- Seeds: labels that touch the border are 'outer' (distance 0) ---
+    border_labels = (
+        set(labels_full[0, :]) |
+        set(labels_full[-1, :]) |
+        set(labels_full[:, 0]) |
+        set(labels_full[:, -1])
+    )
+
+    dist: List[int | None] = [None] * C
+    q = deque()
+    for lab in border_labels:
+        i = int(lab)
+        dist[i] = 0
+        q.append(i)
+
+    # BFS over adjacency graph
+    while q:
+        i = q.popleft()
+        for j in adj[i]:
+            if dist[j] is None:
+                dist[j] = dist[i] + 1
+                q.append(j)
+
+    # Unreached labels (e.g. unused clusters) → shove them into a final inner ring
+    if any(d is None for d in dist):
+        maxd = max(d for d in dist if d is not None) if any(d is not None for d in dist) else 0
+        for i in range(C):
+            if dist[i] is None:
+                dist[i] = maxd + 1
+
+    # --- Build rings by distance ---
+    rings: Dict[int, List[int]] = {}
+    for i, d in enumerate(dist):
+        rings.setdefault(int(d), []).append(i)
+
+    # --- Sort rings by distance (outer→inner) and each ring dark→light ---
+    ordered_rings: List[List[int]] = []
+    for d in sorted(rings.keys()):
+        idxs = rings[d]
+
+        # adjacency priority: we keep rings split by d
+        # dark→light inside the ring
+        idxs.sort(key=lambda i: relative_luminance(approx_palette[i]))
+        ordered_rings.append(idxs)
+
+    return ordered_rings
+
+
 def build_value_tweaks(palette: np.ndarray, recipes_text: List[str], *, threshold=0.25) -> Dict[int, str]:
     """Suggest tiny +/- value tweaks for colors sharing the same recipe."""
     groups = {}
@@ -1466,14 +1562,16 @@ def _auto_grid_step(img_width: int, min_cols: int) -> int:
 BASE_PALETTE = None
 STRENGTH = None
 USE_TINTING_STRENGTH = False  # <--- add
+DARKEN_PER_PIGMENT = None      # <--- add this line
 
-def _init_worker(palette_dict, strength_dict, use_tinting_strength_flag: bool):
+def _init_worker(palette_dict, strength_dict, darken_dict, use_tinting_strength_flag: bool):
     """
     Install palette/strength in worker globals.
     """
-    global BASE_PALETTE, STRENGTH, USE_TINTING_STRENGTH
+    global BASE_PALETTE, STRENGTH, USE_TINTING_STRENGTH, DARKEN_PER_PIGMENT
     BASE_PALETTE = palette_dict
     STRENGTH = strength_dict
+    DARKEN_PER_PIGMENT = darken_dict     # <--- set here
     USE_TINTING_STRENGTH = bool(use_tinting_strength_flag)
 
 
@@ -1774,7 +1872,7 @@ def main(config: dict | None = None):
         with ProcessPoolExecutor(
                 max_workers=max_workers,
                 initializer=_init_worker,
-                initargs=(BASE_PALETTE, STRENGTH, bool(args.use_tinting_strength)),  # <--- add flag here
+                initargs=(BASE_PALETTE, STRENGTH, DARKEN_PER_PIGMENT, bool(args.use_tinting_strength)),  # <--- new
         ) as ex:
             for c in centroids_list:
                 fut = ex.submit(
@@ -2109,7 +2207,7 @@ def main(config: dict | None = None):
                 fg_mask = bg_mask = None
 
         # -------------------------
-        # Per-color pages (original order only)
+        # Per-color pages (configurable order)
         # -------------------------
         if args.per_color_frames:
             # Ensure multiply-underlay factor if outline exists (unchanged)
@@ -2121,12 +2219,28 @@ def main(config: dict | None = None):
             H, W = labels_full.shape
             area = np.array([(labels_full == i).sum() for i in range(args.colors)], dtype=np.int64)
 
-            # Build the canonical 'per_color_order' by your Stepwise sequence (unchanged)
-            per_color_order = []
-            for _title, idxs, _frame in frames_to_emit:
-                for idx in sorted(idxs, key=lambda i: -int(area[i])):
-                    if idx not in per_color_order:
-                        per_color_order.append(idx)
+            # --- Decide per-color order mode ---
+            order_mode = getattr(args, "per_color_order_mode")
+
+            # --- Build per_color_order according to mode ---
+            per_color_order: List[int] = []
+
+            if order_mode == "adjacent":
+                # Adjacency grouping only for per-color frames:
+                # outer → inner rings, within each ring dark → light, large areas first
+                rings = adjacent_rings_by_value(labels_full, approx_uint8)
+                for ring in rings:
+                    for idx in sorted(ring, key=lambda i: -int(area[i])):
+                        if idx not in per_color_order:
+                            per_color_order.append(idx)
+            else:
+                # Old behavior: follow the stepwise frames order
+                for _title, idxs, _frame in frames_to_emit:
+                    for idx in sorted(idxs, key=lambda i: -int(area[i])):
+                        if idx not in per_color_order:
+                            per_color_order.append(idx)
+
+            # Safety: ensure all colors are in the list
             for i in range(args.colors):
                 if i not in per_color_order:
                     per_color_order.append(i)
@@ -2433,85 +2547,403 @@ if __name__ == "__main__":
     # ---------------------------
     # Main CLI
     # ---------------------------
-    # --- NEW: central config with previous CLI defaults ---
     DEFAULT_CONFIG = {
-        # --- Parallelization ---
-        "parallel": True,     # turn off to force single-core
-        "workers": None,      # None = os.cpu_count(); or set an int
-
-        "input": "pics/10.jpg",  # was a required CLI arg; override as needed
+        # ------------------------------------------------------------------
+        # 1) EXECUTION / PERFORMANCE
+        # ------------------------------------------------------------------
+        # parallel:
+        #   - If True, recipes for clustered colors are computed in parallel
+        #     using ProcessPoolExecutor.
+        #   - If False, everything runs single-core (useful for debugging or
+        #     platforms where multiprocessing is problematic).
+        # workers:
+        #   - How many worker processes to spawn when parallel=True.
+        #   - None → use os.cpu_count() (or a similar heuristic).
+        #   - You can set an explicit integer to limit CPU use.
+        "parallel": True,
+        "workers": None,
+        # ------------------------------------------------------------------
+        # 2) INPUT / OUTPUT PATHS
+        # ------------------------------------------------------------------
+        # input:
+        #   - Path to the source image to convert into a paint-by-numbers guide.
+        #   - Can be overridden per-call via config.
+        # pdf:
+        #   - Output filename for the multi-page A4 landscape PDF guide.
+        "input": "pics/9.jpg",
         "pdf": "paint_by_numbers_guide.pdf",
+        # ------------------------------------------------------------------
+        # 3) CANVAS GEOMETRY & PRINT LAYOUT (FOR CENTERLINE SVG CANVAS)
+        # ------------------------------------------------------------------
+        # canvas_dimensions_mm:
+        #   - Physical paper size in millimeters for the “canvas” SVG
+        #     (centerline layout), as (width_mm, height_mm).
+        # canvas_long_margin_mm:
+        #   - Margin applied on BOTH ends of the LONGEST side of the canvas
+        #     when fitting the grid + centerlines.
+        #   - The short side is fitted edge-to-edge; only the long side gets
+        #     this margin.
+        # canvas_rotation_deg:
+        #   - Rotation applied when placing the pixel artwork onto the canvas
+        #     for the centerline SVG.
+        #   - Supported values: 0 or 90 degrees (others are clamped to 0).
+        "canvas_dimensions_mm": (300, 400),
+        "canvas_long_margin_mm": 10.0,
+        "canvas_rotation_deg": 90,
+        # ------------------------------------------------------------------
+        # 4) GLOBAL GRID SETTINGS (USED ON PDF PAGES & SVG GRID)
+        # ------------------------------------------------------------------
+        # grid_step:
+        #   - Grid spacing in pixels for PDF pages and SVG overlays.
+        #   - "auto" or <=0/None → automatically choose a step such that
+        #     at least grid_min_cols boxes fit across the image width.
+        # grid_min_cols:
+        #   - Minimum number of columns that the auto grid will try to
+        #     produce horizontally. Larger values → finer grid.
+        "grid_step": "auto",
+        "grid_min_cols": 7,
+        # ------------------------------------------------------------------
+        # 5) CLUSTERING & COLOR QUANTIZATION
+        # ------------------------------------------------------------------
+        # colors:
+        #   - Number of color clusters to extract from the image.
+        #   - Controls how many numbered “paint regions” you get.
+        # resize:
+        #   - Optional (width, height) tuple to resize the image BEFORE
+        #     clustering (for speed and noise reduction).
+        #   - None → use the full-resolution image for clustering.
+        # cluster_space:
+        #   - Color space in which clustering features are computed:
+        #     "lab" → perceptual CIELAB (recommended).
+        #     "rgb" → raw sRGB (faster, less perceptual).
+        # cluster_algo:
+        #   - Clustering algorithm for quantization:
+        #     "kmeans" → standard KMeans on features.
+        #     "bgmm"   → Bayesian Gaussian Mixture Model with a Dirichlet
+        #                Process prior (effective cluster count may be < colors).
         "colors": 35,
         "resize": None,  # e.g. (W, H)
-        "cluster_space": "lab",  # {"lab","rgb"}
-        "cluster_algo": "kmeans",  # {"kmeans","bgmm"}
+        "cluster_space": "lab",  # {"lab", "rgb"}
+        "cluster_algo": "kmeans",  # {"kmeans", "bgmm"}
+        # ------------------------------------------------------------------
+        # 6) PALETTE & MIXING / RECIPE SEARCH
+        # ------------------------------------------------------------------
+        # palette:
+        #   - Ordered list of pigment names (keys into BASE_PALETTE,
+        #     and optionally STRENGTH / DARKEN_PER_PIGMENT).
+        #   - The order determines the index mapping for recipe vectors.
+        # components:
+        #   - Maximum number of distinct pigments allowed in any single recipe.
+        #   - Higher values allow more complex mixes but increase search cost.
+        # max_parts:
+        #   - Maximum sum of integer “parts” in a recipe.
+        #   - For example, with max_parts=10, recipes like 3+3+4 are allowed,
+        #     but 5+5+3 would be rejected (sum=13).
+        # mix_model:
+        #   - Controls which mixing model is used for recipe evaluation:
+        #       "km"      → strength-aware hybrid Kubelka-Munk (if
+        #                   use_tinting_strength=True) or generic KM.
+        #       "learned" → Mixbox latent-space model with optional
+        #                   per-pigment darkening for “dried” paint behavior.
+        # use_tinting_strength:
+        #   - When mix_model="km":
+        #       True  → enable strength-aware KM model using STRENGTH
+        #               multipliers (empirical tinting power per pigment).
+        #       False → use generic KM-like mixing (no strength multipliers).
+        #   - Ignored for mix_model="learned".
         "palette": list(BASE_PALETTE.keys()),
         "components": 5,
         "max_parts": 10,
-        "mix_model": "learned",  # {"km","learned"}
-        "frame_mode": "combined",  # {"classic","value5","both","combined"}
-        "wrap": 55,
-        # in DEFAULT_CONFIG
-        "grid_step": "auto",  # was 250
-        "grid_min_cols": 7,  # new: minimum boxes horizontally
-        "edge_percentile": 90.0,
-        "hide_components": False,
+        "mix_model": "learned",  # {"km", "learned"}
+        "use_tinting_strength": False,
+        # ------------------------------------------------------------------
+        # 7) FRAME SEQUENCING / HIGH-LEVEL PAINT ORDER
+        # ------------------------------------------------------------------
+        # frame_mode:
+        #   - Selects which multi-step “frame sequence” to render in the PDF:
+        #       "classic"  → highlight/dark/mid/neutrals/etc in separate frames.
+        #       "value5"   → five value bands (deep/core/mid/half/high) only.
+        #       "both"     → emit both classic and value-5 sequences.
+        #       "combined" → hybrid value-based + classic sequence designed
+        #                    for a practical paint workflow.
+        # per_color_frames:
+        #   - If True, create additional “per-color” pages where each page
+        #     shows only one color’s regions (optionally cumulative).
+        #   - If False, skip these per-color pages.
+        # per_color_order_mode:
+        #   - Ordering of colors when generating per-color pages:
+        #       "stepwise":
+        #           Follow the order implied by the chosen frame_mode
+        #           (older behavior; respects the frame painting sequence).
+        #       "adjacent":
+        #           Use adjacency rings from the border inward; within each
+        #           ring, sort dark→light and large areas first (more spatially
+        #           coherent progression).
+        #   - None (if used) would be interpreted as:
+        #         - "adjacent" if frame_mode == "adjacent"
+        #         - "stepwise" otherwise (kept for backward-compat).
+        "frame_mode": "combined",  # {"classic", "value5", "both", "combined"}
         "per_color_frames": True,
+        "per_color_order_mode": "adjacent",
+        # ------------------------------------------------------------------
+        # 8) COLOR-KEY RENDERING & TEXT LAYOUT
+        # ------------------------------------------------------------------
+        # wrap:
+        #   - Base text-wrap width for recipe descriptions (in characters).
+        #   - Individual rows are scaled relative to available width, but this
+        #     is the starting point for line wrapping.
+        # hide_components:
+        #   - If True, hide the component pigment swatches on color-key pages
+        #     (only show the mixed color and text).
+        #   - If False, show small swatches for each component pigment used
+        #     in the recipe.
+        "wrap": 55,
+        "hide_components": False,
+        # ------------------------------------------------------------------
+        # 9) GRID / OUTLINE OVERLAY & SKETCH BLENDING
+        # ------------------------------------------------------------------
+        # edge_percentile:
+        #   - Percentile used to determine high Canny thresholds from gradient
+        #     magnitudes in the OLD edge-based sketch pipeline.
+        #   - Higher values → fewer, stronger edges.
+        # outline_mode:
+        #   - How to compute the outline passed into the PDF pages:
+        #       "image"  → OLD method based on image edges / pencil sketch.
+        #       "labels" → NEW method based on label boundaries only.
+        #       "both"   → Combine image edges and label boundaries.
+        # sketch_style:
+        #   - High-level alias that overrides outline_mode when set:
+        #       "old"   → outline_mode="image"
+        #       "new"   → outline_mode="labels"
+        #       "both"  → outline_mode="both"
+        #   - None → use outline_mode directly.
+        # sketch_alpha:
+        #   - Blending factor (0..1) when multiply-blending the outline
+        #     into the colored frames:
+        #       0.0 → outline disabled in frames.
+        #       1.0 → strong ink-like multiplication.
+        "edge_percentile": 90.0,
+        "outline_mode": "image",
+        "sketch_style": None,  # {"old", "new", "both"}; overrides outline_mode
         "sketch_alpha": 0.25,
+        # ------------------------------------------------------------------
+        # 10) PER-COLOR PAGE ACCUMULATION / PREVIOUS-AREA HIGHLIGHTING
+        # ------------------------------------------------------------------
+        # per_color_cumulative:
+        #   - If True, each per-color page shows not only the current color
+        #     but also the regions painted in previous per-color pages (with
+        #     a special highlight treatment).
+        #   - If False, each per-color page shows only that color’s regions.
+        # prev_alpha:
+        #   - Opacity used when blending previous regions into a per-color
+        #     page background:
+        #       0.0 → previous regions invisible.
+        #       1.0 → previous regions at full highlight strength.
+        # prev_highlight_mode:
+        #   - How to render previous regions on per-color pages:
+        #       "none"        → darken/whiten only (no neon coloration).
+        #       "neon_orange" → blend white with a neon orange overlay.
+        #       "neon_green"  → blend white with a neon green overlay.
+        #       "custom"      → blend white with prev_highlight_rgb color.
+        # prev_highlight_rgb:
+        #   - Custom highlight RGB used only when prev_highlight_mode=="custom".
+        #   - Ignored otherwise.
         "per_color_cumulative": True,
         "prev_alpha": 0.10,
-        "prev_highlight_mode": "neon_green",       # {"none","neon_orange","neon_green","custom"}
-        "prev_highlight_rgb": (255, 90, 0),  # used when prev_highlight_mode=="custom"
+        "prev_highlight_mode": "neon_green",  # {"none", "neon_orange", "neon_green", "custom"}
+        "prev_highlight_rgb": (255, 90, 0),
+        # ------------------------------------------------------------------
+        # 11) REGION CLEANUP (MINIMUM REGION SIZE)
+        # ------------------------------------------------------------------
+        # min_region_px:
+        #   - Minimum area in pixels for any connected label component.
+        #   - Components smaller than this are merged into a neighboring label
+        #     based on local majority voting.
+        # min_region_pct:
+        #   - Minimum area as a percentage of the total image pixels.
+        #   - The effective threshold is max(min_region_px,
+        #     min_region_pct/100 * total_pixels).
+        #   - Set both to 0 to disable small-region cleanup.
         "min_region_px": 0,
         "min_region_pct": 0.0,
-        "outline_mode": "image",  # {"image","labels","both"}
-        "sketch_style": None,  # {"old","new","both"}; if set, overrides outline_mode
+        # ------------------------------------------------------------------
+        # 12) CLEAN STENCIL PIPELINE (OUTLINE POST-PROCESSING)
+        # ------------------------------------------------------------------
+        # apply_clean_stencil:
+        #   - If True, apply an adaptive threshold + light erosion pipeline
+        #     to produce a crisp, printable stencil from the outline_gray
+        #     image, followed by brightness/sharpness adjustments.
+        #   - If False, use the raw outline_gray (image/labels/both).
+        # stencil_brightness:
+        #   - Slider value in 0..1 for brightness adjustment of the stencil
+        #     (mapped internally to a 0.5..2.0 factor).
+        # stencil_sharpness:
+        #   - Slider value in 0..1 for sharpness adjustment of the stencil
+        #     (mapped internally to a 0.5..3.0 factor).
+        # stencil_block_size:
+        #   - Odd kernel size for cv2.adaptiveThreshold (local window).
+        #   - Must be >=3; larger values capture slower illumination changes.
+        # stencil_C:
+        #   - Bias term (C) for cv2.adaptiveThreshold. Higher values usually
+        #     produce slightly lighter stencils (fewer black pixels).
         "apply_clean_stencil": True,
         "stencil_brightness": 1.0,  # sliders 0..1 (mapped internally)
         "stencil_sharpness": 1.0,
         "stencil_block_size": 11,
         "stencil_C": 2,
-        # --- Centerline trace (Inkscape plotting) options ---
-        "export_centerline_svg": True,  # Run centerline trace after PDF generation
-        "centerline_output": "centerline_output.svg",  # Output SVG filename (saved locally)
-        "centerline_blur": 1,  # Gaussian blur amount (lower = more detail)
-        "centerline_threshold": None,  # Manual threshold (0–255), None = use Otsu
-        "centerline_otsu": True,  # Use Otsu automatic threshold
-        "centerline_dilate": 0,  # Dilation iterations (connect broken lines)
-        "centerline_simplify": 0,  # Polyline simplification epsilon (higher = smoother)
-        # Policy knobs (balanced defaults)
+        # ------------------------------------------------------------------
+        # 13) BUILD-ON POLICY (NEUTRAL DEPENDENCY GRAPH)
+        # ------------------------------------------------------------------
+        # The following knobs control how the “build-on” dependency graph is
+        # constructed for colors (optional extra page).
+        # build_max_deltaE:
+        #   - Maximum allowed ΔE*ab between parent and child color to be
+        #     considered a valid “add parts” step.
+        # build_max_added_parts:
+        #   - Maximum total number of extra parts allowed between parent and
+        #     child recipes.
+        # build_max_added_pigments:
+        #   - Maximum number of new Δ>0 pigments introduced at that step.
+        # build_max_new_pigments:
+        #   - Maximum number of pigments that were completely absent in the
+        #     parent but appear in the child.
+        # build_min_added_fraction:
+        #   - Minimum added-parts/parent-total ratio to avoid trivial changes
+        #     (e.g. +1 part on a 50-part parent).
+        # build_max_chain_depth:
+        #   - Upper limit on allowed parent→child chain length (colors deeper
+        #     than this have their parent link removed).
+        # build_parent_choice:
+        #   - Tie-break preference when multiple parents are available:
+        #       "min_deltaE"       → prioritize smallest ΔE.
+        #       "min_new_pigments" → prioritize minimal introduction of
+        #                            completely new pigments.
+        #       "min_added_parts"  → prioritize smallest total added parts.
+        # build_graph_page:
+        #   - If True, emit an extra A4 page showing the dependency graph and
+        #     optional imprimatura swatch/recipe.
         "build_max_deltaE": 8.0,
         "build_max_added_parts": 6,
         "build_max_added_pigments": 2,
         "build_max_new_pigments": 1,
         "build_min_added_fraction": 0.05,
         "build_max_chain_depth": 4,
-        "build_parent_choice": "min_added_parts",  # "min_deltaE" | "min_new_pigments" | "min_added_parts"
-        # --- Mixing behavior ---
-        "use_tinting_strength": False,  # True = strength-aware KM; False = generic KM
-        # --- Build-on graph (extra page) ---
-        "build_graph_page": True,  # add a single neutral dependency-graph page
-        # --- Optional pre-upscale with Real-ESRGAN ---
-        "enable_upscale": False,  # turn on/off the pre-upscale
-        "upscale_ok_min_long": 3000,  # if longest side >= this → no upscale
+        "build_parent_choice": "min_added_parts",
+        "build_graph_page": True,
+        # ------------------------------------------------------------------
+        # 14) REAL-ESRGAN PRE-UPSCALE (OPTIONAL)
+        # ------------------------------------------------------------------
+        # enable_upscale:
+        #   - If True, run Real-ESRGAN (realesrgan-ncnn-vulkan) as a
+        #     pre-processing step when the image is “too small”.
+        #   - If False, do not attempt upscaling.
+        # upscale_ok_min_long:
+        #   - Minimum acceptable longest side (in pixels) for the input image.
+        #   - If longest_side >= this value → NO upscaling is performed.
+        #   - If longest_side < this value → choose a scale from
+        #     realesrgan_scale_choices that brings the longest side above
+        #     this threshold.
+        # realesrgan_bin:
+        #   - Path to the realesrgan-ncnn-vulkan executable.
+        # realesrgan_model_dir:
+        #   - Directory containing the .bin/.param Real-ESRGAN model files.
+        # realesrgan_model_name:
+        #   - Model name passed to the binary (e.g. "realesrgan-x4plus").
+        # realesrgan_scale_choices:
+        #   - Allowed integer upscaling factors; the smallest scale that
+        #     satisfies the ok_min requirement is chosen, or the max if none.
+        "enable_upscale": False,
+        "upscale_ok_min_long": 3000,
         "realesrgan_bin": "realesrgan-ncnn-vulkan-20220424-windows/realesrgan-ncnn-vulkan.exe",
-        # (recommended) also add:
         "realesrgan_model_dir": "realesrgan-ncnn-vulkan-20220424-windows/models",
-        "realesrgan_model_name": "realesrgan-x4plus", # matches your .bin/.param files
-        "realesrgan_scale_choices": (2, 3, 4),  # allowed scale factors
-        # --- Pre-brighten (applied AFTER upscaling, BEFORE analysis)
-        "pre_brighten_pct": 5, # 0 = no change; 1..100 = percentage increase in brightness
-        # --- Canvas Dimensions & Margins ---
-        "canvas_dimensions_mm": (300, 400), # (width, height) in mm
-        "canvas_long_margin_mm": 10.0,  # margin on BOTH ends of the longest canvas side
-        "canvas_rotation_deg": 90,  # NEW: 0 or 90 (rotation when laying out on canvas)
-        "imprimatura_mode": "match_light",  # or "complement_dominant" or "neutral_warm"
-        # --- Foreground/Background split (RMBG-2.0) ---
-        "separate_fg_bg": True,  # when True, Per-Color pages are split BG then FG
-        "rmbg_model_dir": "rmbg",  # local folder containing briaai/RMBG-2.0
-        "rmbg_device": "cuda",  # "cuda" or "cpu" (auto if None)
-        "rmbg_alpha_threshold": 0.5,  # threshold on matte [0..1]
-        "rmbg_target_size": (1024, 1024),  # preprocess size for RMBG
+        "realesrgan_model_name": "realesrgan-x4plus",
+        "realesrgan_scale_choices": (2, 3, 4),
+        # ------------------------------------------------------------------
+        # 15) PRE-BRIGHTENING (BEFORE CLUSTERING / COLORING)
+        # ------------------------------------------------------------------
+        # pre_brighten_pct:
+        #   - Percentage increase in brightness applied AFTER any upscaling
+        #     but BEFORE clustering/color analysis.
+        #   - 0   → no change.
+        #   - 1–100 → mapped to a factor ~= 1.0–2.0 depending on the
+        #             internal slider mapping.
+        "pre_brighten_pct": 5,
+        # ------------------------------------------------------------------
+        # 16) IMPRIMATURA (TONED GROUND) SELECTION
+        # ------------------------------------------------------------------
+        # imprimatura_mode:
+        #   - Strategy for auto-picking a suggested imprimatura (toned ground)
+        #     color from the image:
+        #       "match_light"        → use hue from highlight pixels
+        #                              (top ~20% in L*).
+        #       "complement_dominant"→ use the complement of the dominant
+        #                              mid-tone hue in the scene.
+        #       "neutral_warm"       → fixed warm-neutral brown-paper style
+        #                              target hue (fallback when scene is
+        #                              ambiguous).
+        "imprimatura_mode": "match_light",
+        # ------------------------------------------------------------------
+        # 17) FOREGROUND / BACKGROUND SPLIT (RMBG-2.0)
+        # ------------------------------------------------------------------
+        # separate_fg_bg:
+        #   - If True, run background removal (RMBG-2.0) on the input image
+        #     to create a foreground and background matte.
+        #   - Per-color pages are then split into two tracks:
+        #       1) Background colors (BG).
+        #       2) Foreground colors (FG), seeded with already-painted BG.
+        #   - If False, the per-color logic ignores any FG/BG distinction.
+        # rmbg_model_dir:
+        #   - Directory containing BRIA RMBG-2.0 weights (Hugging Face layout).
+        # rmbg_device:
+        #   - Device for RMBG inference:
+        #       "cuda" → use GPU if available.
+        #       "cpu"  → force CPU.
+        #       None   → auto-detect.
+        # rmbg_alpha_threshold:
+        #   - Threshold on the [0..1] alpha matte to decide FG vs BG:
+        #       matte >= threshold → foreground.
+        #       matte <  threshold → background.
+        # rmbg_target_size:
+        #   - Size (width, height) for RMBG preprocessing; many models expect a
+        #     ~1024×1024 square or similar.
+        "separate_fg_bg": False,
+        "rmbg_model_dir": "rmbg",
+        "rmbg_device": "cuda",
+        "rmbg_alpha_threshold": 0.5,
+        "rmbg_target_size": (1024, 1024),
+        # ------------------------------------------------------------------
+        # 18) CENTERLINE TRACE (VECTOR STENCIL FOR PLOTTERS)
+        # ------------------------------------------------------------------
+        # export_centerline_svg:
+        #   - If True, generate a single-stroke centerline SVG from the final
+        #     cleaned stencil outline (optionally with a grid).
+        # centerline_output:
+        #   - Path to the primary centerline SVG file.
+        # centerline_blur:
+        #   - Gaussian blur radius (kernel size in pixels) applied before
+        #     thresholding for the centerline extraction.
+        #   - 0 or 1 → minimal blur (more detail, more noise).
+        # centerline_threshold:
+        #   - Manual threshold in [0..255] for binarizing the stencil.
+        #   - None → use Otsu’s method (if centerline_otsu=True).
+        # centerline_otsu:
+        #   - If True, use Otsu automatic threshold; if False and
+        #     centerline_threshold is not None, use the manual threshold.
+        # centerline_dilate:
+        #   - Number of dilation iterations after thresholding to connect
+        #     small gaps before skeletonization.
+        # centerline_simplify:
+        #   - Epsilon for cv2.approxPolyDP polyline simplification on the
+        #     extracted centerlines:
+        #       0  → no simplification (raw contours).
+        #      >0  → smoother, fewer points; too high may simplify away detail.
+        "export_centerline_svg": True,
+        "centerline_output": "centerline_output.svg",
+        "centerline_blur": 1,
+        "centerline_threshold": None,
+        "centerline_otsu": True,
+        "centerline_dilate": 0,
+        "centerline_simplify": 0,
     }
 
     main()
