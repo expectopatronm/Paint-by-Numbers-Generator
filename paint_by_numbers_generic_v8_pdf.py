@@ -2212,6 +2212,10 @@ def main(config: dict | None = None):
         # Per-color pages (configurable order)
         # -------------------------
         if args.per_color_frames:
+
+            # Reference image shown on every per-color page (top-right)
+            pbn_reference_with_grid = add_grid_to_rgb(pbn_image, grid_step=args.grid_step, grid_color=200)
+
             # Ensure multiply-underlay factor if outline exists (unchanged)
             a = float(np.clip(args.sketch_alpha, 0.0, 1.0))
             if sketch_factor_rgb is None and outline_gray is not None:
@@ -2306,10 +2310,20 @@ def main(config: dict | None = None):
 
                         # Layout
                         fig = new_fig((11.69, 8.27))
-                        gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
-                        axL = fig.add_subplot(gs[0, 0]);
-                        axR = fig.add_subplot(gs[0, 1])
+                        gs = GridSpec(
+                            2, 2,
+                            width_ratios=[3, 1],
+                            height_ratios=[1, 1],
+                            figure=fig,
+                            wspace=0.02,
+                            hspace=0.04
+                        )
 
+                        axL = fig.add_subplot(gs[:, 0])
+                        axRT = fig.add_subplot(gs[0, 1])
+                        axRB = fig.add_subplot(gs[1, 1])
+
+                        # Left: current per-color frame
                         axL.imshow(frame_with_grid)
                         role = "Background" if which_mask_name == "bg" else "Foreground"
                         axL.set_title(
@@ -2320,8 +2334,14 @@ def main(config: dict | None = None):
                         )
                         axL.axis("off")
 
+                        # Top-right: full clustered image (reference)
+                        axRT.imshow(pbn_reference_with_grid)
+                        axRT.set_title("Clustered image (reference)", fontsize=9, pad=4)
+                        axRT.axis("off")
+
+                        # Bottom-right: existing color key panel
                         draw_color_key(
-                            axR, centroids, all_recipes, all_entries, BASE_PALETTE,
+                            axRB, centroids, all_recipes, all_entries, BASE_PALETTE,
                             used_indices=[i],
                             title=f"Color Key • Color #{i + 1} ({role})",
                             tweaks=tweaks,
@@ -2331,7 +2351,8 @@ def main(config: dict | None = None):
                             left_pad=1.25, right_margin=0.18, text_gap=0.05,
                             approx_palette=approx_uint8
                         )
-                        axR.text(0.05, 0.05, f"Color #{i + 1}", fontsize=8, transform=axR.transAxes)
+                        axRB.text(0.05, 0.05, f"Color #{i + 1}", fontsize=8, transform=axRB.transAxes)
+                        axRB.axis("off")
 
                         pdf.savefig(fig, dpi=300)
                         plt.close(fig)
@@ -2389,18 +2410,34 @@ def main(config: dict | None = None):
                     frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
 
                     fig = new_fig((11.69, 8.27))
-                    gs = GridSpec(1, 2, width_ratios=[3, 1], figure=fig, wspace=0.02)
-                    axL = fig.add_subplot(gs[0, 0]);
-                    axR = fig.add_subplot(gs[0, 1])
+                    gs = GridSpec(
+                        2, 2,
+                        width_ratios=[3, 1],
+                        height_ratios=[1, 1],
+                        figure=fig,
+                        wspace=0.02,
+                        hspace=0.04
+                    )
 
+                    axL = fig.add_subplot(gs[:, 0])  # left spans both rows
+                    axRT = fig.add_subplot(gs[0, 1])  # top-right: full clustered reference
+                    axRB = fig.add_subplot(gs[1, 1])  # bottom-right: existing panel (color key)
+
+                    # Left: current per-color frame
                     axL.imshow(frame_with_grid)
                     axL.set_title((f"Per-Color • #{i + 1} + Grid "
                                    f"{'(cumulative, prevα=' + str(args.prev_alpha) + ')' if args.per_color_cumulative else ''} "
                                    f"{'(outline multiply underlay)' if sketch_factor_rgb is not None else ''}"), pad=2)
                     axL.axis("off")
 
+                    # Top-right: full clustered image (reference)
+                    axRT.imshow(pbn_reference_with_grid)
+                    axRT.set_title("Clustered image (reference)", fontsize=9, pad=4)
+                    axRT.axis("off")
+
+                    # Bottom-right: what you already had (color key)
                     draw_color_key(
-                        axR, centroids, all_recipes, all_entries, BASE_PALETTE,
+                        axRB, centroids, all_recipes, all_entries, BASE_PALETTE,
                         used_indices=[i],
                         title=f"Color Key • Color #{i + 1}",
                         tweaks=tweaks,
@@ -2410,9 +2447,10 @@ def main(config: dict | None = None):
                         left_pad=1.25, right_margin=0.18, text_gap=0.05,
                         approx_palette=approx_uint8
                     )
-                    axR.text(0.05, 0.05, f"Color #{i + 1}", fontsize=8, transform=axR.transAxes)
+                    axRB.text(0.05, 0.05, f"Color #{i + 1}", fontsize=8, transform=axRB.transAxes)
+                    axRB.axis("off")
 
-                    pdf.savefig(fig, dpi=300);
+                    pdf.savefig(fig, dpi=300)
                     plt.close(fig)
 
                     if args.per_color_cumulative:
@@ -2572,7 +2610,7 @@ if __name__ == "__main__":
         #   - Can be overridden per-call via config.
         # pdf:
         #   - Output filename for the multi-page A4 landscape PDF guide.
-        "input": "pics/3.jpg",
+        "input": "pics/27.jpg",
         "pdf": "paint_by_numbers_guide.pdf",
         # ------------------------------------------------------------------
         # 3) CANVAS GEOMETRY & PRINT LAYOUT (FOR CENTERLINE SVG CANVAS)
