@@ -28,7 +28,7 @@ import svgwrite
 from skimage.morphology import skeletonize
 from skimage import measure
 from sklearn.cluster import KMeans
-from sklearn.mixture import BayesianGaussianMixture
+from sklearn.mixture import BayesianGaussianMixture, GaussianMixture
 
 # FG/BG separation (optional)
 import torch
@@ -1812,9 +1812,12 @@ def main(config: dict | None = None):
     else:
         feats = pixels_small
 
-    if getattr(args, "cluster_algo", "kmeans") == "bgmm":
-        # Variational Bayesian GMM with Dirichlet Process prior (truncated stick-breaking)
-        # n_components is an **upper bound**; unused components get near-zero weight.
+    # -------------------------
+    # Clustering (KMeans / BGMM / GMM) in LAB or RGB
+    # -------------------------
+    algo = str(getattr(args, "cluster_algo", "kmeans")).lower()
+
+    if algo == "bgmm":
         n_comp = int(max(2, args.colors))
         bgmm = BayesianGaussianMixture(
             n_components=n_comp,
@@ -1827,13 +1830,34 @@ def main(config: dict | None = None):
 
         labels_small = bgmm.predict(feats).reshape(Hs, Ws).astype(np.uint8)
 
-        # Centroids from model means
         if args.cluster_space == "lab":
             centroids_lab = bgmm.means_.astype(np.float32)
             centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
             centroids = np.array(centroids_rgb, dtype=np.uint8)
         else:
             centroids = np.clip(np.rint(bgmm.means_), 0, 255).astype(np.uint8)
+
+    elif algo == "gmm":
+        n_comp = int(max(2, args.colors))
+        gmm = GaussianMixture(
+            n_components=n_comp,
+            covariance_type=str(getattr(args, "gmm_covariance_type", "full")),
+            n_init=int(getattr(args, "gmm_n_init", 2)),
+            max_iter=int(getattr(args, "gmm_max_iter", 300)),
+            reg_covar=float(getattr(args, "gmm_reg_covar", 1e-6)),
+            init_params="kmeans",
+            random_state=42
+        ).fit(feats)
+
+        labels_small = gmm.predict(feats).reshape(Hs, Ws).astype(np.uint8)
+
+        # Centroids from model means_
+        if args.cluster_space == "lab":
+            centroids_lab = gmm.means_.astype(np.float32)
+            centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
+            centroids = np.array(centroids_rgb, dtype=np.uint8)
+        else:
+            centroids = np.clip(np.rint(gmm.means_), 0, 255).astype(np.uint8)
 
     else:
         # Default: KMeans
@@ -2629,7 +2653,7 @@ if __name__ == "__main__":
         #   - Supported values: 0 or 90 degrees (others are clamped to 0).
         "canvas_dimensions_mm": (300, 400),
         "canvas_long_margin_mm": 10.0,
-        "canvas_rotation_deg": 90,
+        "canvas_rotation_deg": 0,
         # ------------------------------------------------------------------
         # 4) GLOBAL GRID SETTINGS (USED ON PDF PAGES & SVG GRID)
         # ------------------------------------------------------------------
@@ -2664,7 +2688,12 @@ if __name__ == "__main__":
         "colors": 30,
         "resize": None,  # e.g. (W, H)
         "cluster_space": "lab",  # {"lab", "rgb"}
-        "cluster_algo": "kmeans",  # {"kmeans", "bgmm"}
+        "cluster_algo": "kmeans",  # {"kmeans", "bgmm", "gmm"}
+        # Optional GMM params
+        "gmm_covariance_type": "full",  # {"full","tied","diag","spherical"}
+        "gmm_n_init": 2,
+        "gmm_max_iter": 300,
+        "gmm_reg_covar": 1e-6,
         # ------------------------------------------------------------------
         # 6) PALETTE & MIXING / RECIPE SEARCH
         # ------------------------------------------------------------------
