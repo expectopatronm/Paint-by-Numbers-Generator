@@ -133,4 +133,53 @@ data/
 .idea/
 
 # RMBG2.0+
-rmbg
+rmbg/
+
+# Local model/checkpoint weights and downloaded model caches
+supir_models/
+*.ckpt
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.onnx
+*.gguf
+*.rar
+*.zip
+
+# Vendored repositories should be committed as source, not nested repos/caches
+SUPIR/.git/
+SUPIR/.idea/
+SUPIR/**/__pycache__/
+SUPIR/**/*.py[cod]
+SUPIR/**/.ipynb_checkpoints/
+SUPIR/**/checkpoints/
+SUPIR/**/outputs/
+
+# Generated paint-by-numbers artifacts
+*.pdf
+centerline_output*.svg
+*_canvas.svg
+*_guide.pdf
+*.upx*.png
+*.supirx*.png
+centerline_output_test*.svg
+
+# Local input/reference photos. Keep the existing small samples addable.
+pics/*
+!pics/1.jpg
+!pics/2.jpg
+!pics/3.jpg
+!pics/4.jpg
+!pics/photo2.png
+!pics/photo3.png
+
+# Optional local image/model output folders
+outputs/
+output/
+results/
+tmp/
+temp/
+
+# Local Real-ESRGAN binaries/models
+realesrgan-ncnn-vulkan*/

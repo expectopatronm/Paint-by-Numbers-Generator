@@ -1,10 +1,35 @@
-opencv-python
+# Core paint-by-numbers pipeline
 numpy
-scikit-image
-svgwrite
-mixbox
+opencv-python
 pillow
 matplotlib
-scikit-learn
 scipy
-pypandoc
+scikit-image
+scikit-learn
+colour-science
+mixbox
+svgwrite
+
+# Optional foreground/background masking
+torch
+torchvision
+transformers
+
+# Optional SUPIR integration
+accelerate
+diffusers
+einops
+einops-exts
+k-diffusion
+kornia
+omegaconf
+open-clip-torch
+pytorch-lightning
+PyYAML
+timm
+tqdm
+xformers
+
+# Optional AxiDraw plotting UI
+pyaxidraw
+textual

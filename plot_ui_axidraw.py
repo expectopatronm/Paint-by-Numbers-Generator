@@ -53,7 +53,6 @@ class PlotUI(App):
         # Setup machine and options
         self.ad.plot_setup(self.svg_file)
 
-        MM_TO_INCH = 1.0/25.4
         self.ad.options.pen_pos_up     = 60
         self.ad.options.pen_pos_down   = 30
         self.ad.options.speed_pendown  = 75

@@ -186,6 +186,12 @@ This makes the PDF both a **big-picture reference** and a **step-by-step workboo
 - **Edge sketch:**  
   Control grid and edge detection via `--grid-step` and `--edge-percentile`.
 
+- **External sketch/stencil:**  
+  Set `external_sketch` in the config to a sketch image path when you want to
+  provide the line art yourself. The supplied sketch is resized to the source
+  image size and used for the PDF outline page, colored-frame underlay,
+  per-color underlay, and centerline SVG tracing.
+
 ---
 
 ## 6. Why This Approach Works
@@ -228,4 +234,3 @@ This makes the PDF both a **big-picture reference** and a **step-by-step workboo
 ---
 
 Happy painting 🎨
-
