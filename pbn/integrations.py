@@ -96,7 +96,6 @@ def _maybe_upscale_with_supir(input_path: str,
                               n_prompt: str = "",
                               ae_dtype: str = "bf16",
                               diff_dtype: str = "fp16",
-                              no_llava: bool = True,
                               use_tile_vae: bool = True,
                               loading_half_params: bool = False,
                               extra_args: Sequence[str] | None = None) -> str:
@@ -166,8 +165,6 @@ def _maybe_upscale_with_supir(input_path: str,
             "--ae_dtype", str(ae_dtype),
             "--diff_dtype", str(diff_dtype),
         ]
-        if no_llava:
-            cmd.append("--no_llava")
         if use_tile_vae:
             cmd.append("--use_tile_vae")
         if loading_half_params:
@@ -257,7 +254,6 @@ def _maybe_upscale_input(input_path: str, args) -> str:
         n_prompt=str(getattr(args, "supir_n_prompt", "")),
         ae_dtype=str(getattr(args, "supir_ae_dtype", "bf16")),
         diff_dtype=str(getattr(args, "supir_diff_dtype", "fp16")),
-        no_llava=bool(getattr(args, "supir_no_llava", True)),
         use_tile_vae=bool(getattr(args, "supir_use_tile_vae", True)),
         loading_half_params=bool(getattr(args, "supir_loading_half_params", False)),
         extra_args=list(getattr(args, "supir_extra_args", []) or []),

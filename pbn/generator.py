@@ -13,7 +13,6 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec
 from PIL import Image, ImageEnhance, ImageOps
 from sklearn.cluster import KMeans
-from sklearn.mixture import BayesianGaussianMixture, GaussianMixture
 
 from . import color as color_space
 from . import mixing
@@ -126,80 +125,22 @@ def main(config: dict | None = None):
     Hs, Ws, _ = data_small.shape
     pixels_small = data_small.reshape((-1, 3)).astype(np.float32)
 
-    # -------------------------
-    # Clustering (KMeans or BGMM) in LAB or RGB
-    # -------------------------
-    if args.cluster_space == "lab":
-        def rgbrow_to_labrows(arr_uint8):
-            labs = []
-            for r, g, b in arr_uint8:
-                lab = rgb8_to_lab(np.array([r, g, b], dtype=np.float32))
-                labs.append(lab)
-            return np.array(labs, dtype=np.float32)
+    # K-Means clustering in perceptual LAB space.
+    def rgbrow_to_labrows(arr_uint8):
+        labs = []
+        for r, g, b in arr_uint8:
+            lab = rgb8_to_lab(np.array([r, g, b], dtype=np.float32))
+            labs.append(lab)
+        return np.array(labs, dtype=np.float32)
 
-        feats = rgbrow_to_labrows(pixels_small.astype(np.uint8))
-    else:
-        feats = pixels_small
+    feats = rgbrow_to_labrows(pixels_small.astype(np.uint8))
+    kmeans = KMeans(n_clusters=args.colors, random_state=42, n_init=8)
+    kmeans.fit(feats)
+    labels_small = kmeans.labels_.reshape(Hs, Ws).astype(np.uint8)
 
-    # -------------------------
-    # Clustering (KMeans / BGMM / GMM) in LAB or RGB
-    # -------------------------
-    algo = str(getattr(args, "cluster_algo", "kmeans")).lower()
-
-    if algo == "bgmm":
-        n_comp = int(max(2, args.colors))
-        bgmm = BayesianGaussianMixture(
-            n_components=n_comp,
-            covariance_type="full",
-            weight_concentration_prior_type="dirichlet_process",
-            init_params="kmeans",
-            random_state=42,
-            max_iter=300
-        ).fit(feats)
-
-        labels_small = bgmm.predict(feats).reshape(Hs, Ws).astype(np.uint8)
-
-        if args.cluster_space == "lab":
-            centroids_lab = bgmm.means_.astype(np.float32)
-            centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
-            centroids = np.array(centroids_rgb, dtype=np.uint8)
-        else:
-            centroids = np.clip(np.rint(bgmm.means_), 0, 255).astype(np.uint8)
-
-    elif algo == "gmm":
-        n_comp = int(max(2, args.colors))
-        gmm = GaussianMixture(
-            n_components=n_comp,
-            covariance_type=str(getattr(args, "gmm_covariance_type", "full")),
-            n_init=int(getattr(args, "gmm_n_init", 2)),
-            max_iter=int(getattr(args, "gmm_max_iter", 300)),
-            reg_covar=float(getattr(args, "gmm_reg_covar", 1e-6)),
-            init_params="kmeans",
-            random_state=42
-        ).fit(feats)
-
-        labels_small = gmm.predict(feats).reshape(Hs, Ws).astype(np.uint8)
-
-        # Centroids from model means_
-        if args.cluster_space == "lab":
-            centroids_lab = gmm.means_.astype(np.float32)
-            centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
-            centroids = np.array(centroids_rgb, dtype=np.uint8)
-        else:
-            centroids = np.clip(np.rint(gmm.means_), 0, 255).astype(np.uint8)
-
-    else:
-        # Default: KMeans
-        kmeans = KMeans(n_clusters=args.colors, random_state=42, n_init=8)
-        kmeans.fit(feats)
-        labels_small = kmeans.labels_.reshape(Hs, Ws).astype(np.uint8)
-
-        if args.cluster_space == "lab":
-            centroids_lab = kmeans.cluster_centers_.astype(np.float32)
-            centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
-            centroids = np.array(centroids_rgb, dtype=np.uint8)
-        else:
-            centroids = np.clip(np.rint(kmeans.cluster_centers_), 0, 255).astype(np.uint8)
+    centroids_lab = kmeans.cluster_centers_.astype(np.float32)
+    centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
+    centroids = np.array(centroids_rgb, dtype=np.uint8)
 
     # Upsample labels to full res
     labels_full = Image.fromarray(labels_small, mode="L").resize((orig_w, orig_h), resample=Image.NEAREST)
@@ -399,7 +340,7 @@ def main(config: dict | None = None):
         ax1 = fig.add_subplot(gs[0, 0]); ax2 = fig.add_subplot(gs[1, 0]); ax3 = fig.add_subplot(gs[:, 1])
         ax1.imshow(rgb_full); ax1.set_title("Original", pad=2); ax1.axis("off")
         ax2.imshow(pbn_image)
-        ax2.set_title(f"Paint by Numbers ({args.colors} colors) • cluster={args.cluster_space} • mixmodel=learned • max parts≤{args.max_parts}", pad=2)
+        ax2.set_title(f"Paint by Numbers ({args.colors} colors) • cluster=LAB K-Means • mixmodel=learned • max parts≤{args.max_parts}", pad=2)
         ax2.axis("off")
         draw_color_key(ax3, centroids, all_recipes, all_entries, BASE_PALETTE,
                        used_indices=list(range(args.colors)),
@@ -491,7 +432,6 @@ def main(config: dict | None = None):
                         img_outline,
                         grid_step=args.grid_step,
                         grid_color=200,
-                        image_sketch_mode=str(args.image_sketch_mode),
                         canny_high_pct=float(args.edge_percentile),
                     )
 

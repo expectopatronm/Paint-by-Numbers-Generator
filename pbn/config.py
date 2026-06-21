@@ -123,24 +123,10 @@ DEFAULT_CONFIG = {
     #   - Optional (width, height) tuple to resize the image BEFORE
     #     clustering (for speed and noise reduction).
     #   - None → use the full-resolution image for clustering.
-    # cluster_space:
-    #   - Color space in which clustering features are computed:
-    #     "lab" → perceptual CIELAB (recommended).
-    #     "rgb" → raw sRGB (faster, less perceptual).
-    # cluster_algo:
-    #   - Clustering algorithm for quantization:
-    #     "kmeans" → standard KMeans on features.
-    #     "bgmm"   → Bayesian Gaussian Mixture Model with a Dirichlet
-    #                Process prior (effective cluster count may be < colors).
-    "colors": 15,
+    # Clustering is fixed to K-Means in perceptual CIELAB space.
+    # Potts/MRF smoothing below handles speckle reduction after clustering.
+    "colors": 20,
     "resize": None,  # e.g. (W, H)
-    "cluster_space": "lab",  # {"lab", "rgb"}
-    "cluster_algo": "kmeans",  # {"kmeans", "bgmm", "gmm"}
-    # Optional GMM params
-    "gmm_covariance_type": "full",  # {"full","tied","diag","spherical"}
-    "gmm_n_init": 2,
-    "gmm_max_iter": 300,
-    "gmm_reg_covar": 1e-6,
     # mrf_smoothing:
     #   - If True, apply Potts/MRF smoothing after clustering and label
     #     upsampling, before tiny-region cleanup and PDF rendering.
@@ -230,15 +216,9 @@ DEFAULT_CONFIG = {
     #   - Percentile used to determine high Canny thresholds from gradient
     #     magnitudes in the OLD edge-based sketch pipeline.
     #   - Higher values → fewer, stronger edges.
-    # image_sketch_mode:
-    #   - "plotter" -> detailed binary line art for pen plotting.
-    #   - "legacy"  -> old tonal pencil sketch.
-    # plotter_*:
-    #   - Lower percentiles keep more detail; higher values simplify.
-    #   - line_px should usually stay 1 for SVG/plotter centerlines.
     # outline_mode:
     #   - How to compute the outline passed into the PDF pages:
-    #       "image" → method based on image edges / pencil sketch.
+    #       "image" → legacy method based on image edges / pencil sketch.
     #   - Label-boundary/closed-region outline generation has been removed.
     # sketch_style:
     #   - High-level alias that overrides outline_mode when set:
@@ -250,11 +230,6 @@ DEFAULT_CONFIG = {
     #       0.0 → outline disabled in frames.
     #       1.0 → strong ink-like multiplication.
     "edge_percentile": 90.0,
-    "image_sketch_mode": "plotter",  # {"plotter", "legacy"}
-    "plotter_edge_percentile": 90.0,
-    "plotter_detail_percentile": 90.0,
-    "plotter_min_component_px": 1000,
-    "plotter_line_px": 1,
     "outline_mode": "image",
     "sketch_style": None,  # {"old"}; overrides outline_mode
     "sketch_alpha": 0.25,
@@ -401,7 +376,6 @@ DEFAULT_CONFIG = {
     "supir_n_prompt": "",
     "supir_ae_dtype": "bf16",
     "supir_diff_dtype": "fp16",
-    "supir_no_llava": True,
     "supir_use_tile_vae": True,
     "supir_loading_half_params": False,
     "supir_extra_args": [],

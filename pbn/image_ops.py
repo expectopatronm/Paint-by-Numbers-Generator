@@ -7,7 +7,6 @@ from typing import Dict, List, Tuple
 import cv2
 import numpy as np
 from PIL import Image, ImageEnhance, ImageOps
-from skimage.morphology import skeletonize
 
 from .color import Lstar_from_rgb, relative_luminance, rgb_to_hsv
 
@@ -365,66 +364,8 @@ def pencil_readable_norm(
     return float01_to_u8(pencil)
 
 
-def plotter_detail_line_sketch(
-    bgr: np.ndarray,
-    *,
-    edge_percentile: float = 90.0,
-    detail_percentile: float = 90.0,
-    min_component_px: int = 1000,
-    line_px: int = 1,
-) -> np.ndarray:
-    """
-    High-recall line art for pen plotter transfer.
-
-    This intentionally avoids tonal shading. It extracts strong ink ridges
-    from the legacy image sketch, removes short fragments, then skeletonizes
-    the result into thin black paths on white.
-    """
-    edge_pct = float(np.clip(edge_percentile, 55, 96))
-    detail_pct = float(np.clip(detail_percentile, 75, 98.5))
-
-    gray = ensure_gray(bgr)
-    h, w = gray.shape[:2]
-    legacy = pencil_readable_norm(
-        bgr,
-        sketchiness01=0.95,
-        softness01=0.05,
-        texture_suppression01=0.35,
-        despeckle01=0.65,
-        stroke01=0.02,
-        canny_high_pct=max(60, min(96, edge_pct)),
-    )
-    ink_strength = 255 - legacy
-    nz = ink_strength[ink_strength > 0]
-    edge_bool = ink_strength >= np.percentile(nz, detail_pct) if nz.size else np.zeros_like(legacy, dtype=bool)
-
-    edge_u8 = edge_bool.astype(np.uint8) * 255
-    if min_component_px > 0:
-        edge_u8 = remove_small_components_bool(edge_u8, int(min_component_px))
-
-    thin = skeletonize(edge_u8 > 0)
-    out = np.full((h, w), 255, dtype=np.uint8)
-    out[thin] = 0
-    if line_px > 1:
-        ink = (out == 0).astype(np.uint8) * 255
-        ink = cv2.dilate(ink, np.ones((int(line_px), int(line_px)), np.uint8), 1)
-        out = np.where(ink > 0, 0, 255).astype(np.uint8)
-    return out
-
-
 def render_image_sketch_gray(bgr: np.ndarray, args=None, **kwargs) -> np.ndarray:
-    mode = str(getattr(args, "image_sketch_mode", kwargs.pop("image_sketch_mode", "plotter"))).lower()
     edge_pct = float(getattr(args, "edge_percentile", kwargs.pop("canny_high_pct", 90.0)))
-    if mode == "legacy":
-        return pencil_readable_norm(bgr, canny_high_pct=edge_pct, **kwargs)
-    if mode == "plotter":
-        return plotter_detail_line_sketch(
-            bgr,
-            edge_percentile=float(getattr(args, "plotter_edge_percentile", 90.0)),
-            detail_percentile=float(getattr(args, "plotter_detail_percentile", 90.0)),
-            min_component_px=int(getattr(args, "plotter_min_component_px", 1000)),
-            line_px=int(getattr(args, "plotter_line_px", 1)),
-        )
     return pencil_readable_norm(bgr, canny_high_pct=edge_pct, **kwargs)
 
 

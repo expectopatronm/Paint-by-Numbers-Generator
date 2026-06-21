@@ -8,7 +8,7 @@
 
 This project converts any input image into a structured **paint-by-numbers guide**, complete with:
 
-- **Simplified color clusters** (via K-Means).
+- **Simplified color clusters** via LAB K-Means with Potts/MRF smoothing to reduce speckle.
 - **Mixing recipes** using a fixed set of real paint colors (Titanium White, Lemon Yellow, Vermillion Red, Carmine, Ultramarine, Pthalo Green, Yellow Ochre, Lamp Black).
 
 <p align="center">
@@ -34,10 +34,11 @@ This project converts any input image into a structured **paint-by-numbers guide
 ## 1. Color Clustering (Image Simplification)
 
 1. The input image is optionally **downsampled** (to speed up computation).
-2. K-Means clustering groups all pixels into a fixed number of clusters (e.g., 15 or 20 colors).
+2. K-Means clustering in perceptual LAB space groups all pixels into a fixed number of clusters (e.g., 15 or 20 colors).
 3. Each cluster centroid becomes a “paint number” — a representative color in the paint-by-numbers map.
-4. The clustered image is recolored with **the actual integer-mix approximation** (depends on `--max-parts` and `--components`; mixing always uses the learned Mixbox model).
-5. The result is **upsampled back to the original resolution** with nearest-neighbor interpolation.
+4. Potts/MRF smoothing reduces isolated speckles in the label map.
+5. The clustered image is recolored with **the actual integer-mix approximation** (depends on `--max-parts` and `--components`; mixing always uses the learned Mixbox model).
+6. The result is **upsampled back to the original resolution** with nearest-neighbor interpolation.
 
 This ensures that the paint-by-numbers image *really reflects your chosen mixing constraints*.
 
@@ -191,7 +192,7 @@ This makes the PDF both a **big-picture reference** and a **step-by-step workboo
 
 ## 6. Why This Approach Works
 
-- **K-Means** simplifies the image into stable color regions.  
+- **LAB K-Means + Potts/MRF smoothing** simplifies the image into stable color regions with less speckle.  
 - **Integer mix search** guarantees recipes you can actually scoop out with a palette knife.  
 - **Advanced mixing models** mimic physical paint behavior better than plain averages.  
 - **ΔE optimization** ensures accuracy against the cluster target.  
