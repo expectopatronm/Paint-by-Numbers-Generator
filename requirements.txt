@@ -22,10 +22,12 @@ einops
 einops-exts
 k-diffusion
 kornia
+huggingface-hub
 omegaconf
 open-clip-torch
 pytorch-lightning
 PyYAML
+safetensors
 timm
 tqdm
 xformers

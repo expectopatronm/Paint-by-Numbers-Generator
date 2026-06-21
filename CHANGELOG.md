@@ -2,6 +2,12 @@
 
 ## 2026-06-21
 
+### Simplified Sketch and Clustering Modes
+Removed the Plotter sketch mode and the BGMM/GMM/RGB clustering options. The generator now uses the legacy image-edge sketch path and a single LAB K-Means clustering path, followed by Potts/MRF smoothing.
+
+### Trimmed Vendored SUPIR
+Reduced the vendored `SUPIR/` folder to the runtime pieces needed by PBN upscaling. Removed demos, assets, captioning, face restoration, eval/training files, and unused YAML variants; SUPIR now runs prompt-only restoration through `test.py`.
+
 ### Enabled Potts/MRF Label Smoothing
 Added an optional Potts/MRF smoothing pass after clustering and before final region cleanup. It is enabled by default to reduce tiny speckled regions while still keeping the paint map based on the clustered image colors.
 
