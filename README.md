@@ -15,7 +15,7 @@ This project converts any input image into a structured **paint-by-numbers guide
   <img src="docs/Screenshot%202025-09-18%20003932.png" width="75%" />
 </p>  
 
-- **Advanced mixing models** (`--mix-model`) to better approximate real paint behavior.
+- **Learned Mixbox paint mixing** to better approximate real paint behavior.
 - **Progress frames** that guide the painting process step-by-step (Darks → Midtones → Neutrals → Highlights → Completed).
 
 <p align="center">
@@ -36,7 +36,7 @@ This project converts any input image into a structured **paint-by-numbers guide
 1. The input image is optionally **downsampled** (to speed up computation).
 2. K-Means clustering groups all pixels into a fixed number of clusters (e.g., 15 or 20 colors).
 3. Each cluster centroid becomes a “paint number” — a representative color in the paint-by-numbers map.
-4. The clustered image is recolored with **the actual integer-mix approximation** (depends on `--max-parts`, `--components`, and `--mix-model`).
+4. The clustered image is recolored with **the actual integer-mix approximation** (depends on `--max-parts` and `--components`; mixing always uses the learned Mixbox model).
 5. The result is **upsampled back to the original resolution** with nearest-neighbor interpolation.
 
 This ensures that the paint-by-numbers image *really reflects your chosen mixing constraints*.
@@ -53,11 +53,7 @@ Instead, the script solves for **integer mixing ratios** of your available paint
 
 - For each cluster centroid, we test **all integer partitions** of `--max-parts` distributed over up to `--components` base paints.
 
-- Mixing can be evaluated under different models (`--mix-model`):  
-  - `linear`: mix in linear sRGB space (mathematically simple, not very physical).  
-  - `lab`: mix in CIE Lab space (perceptually uniform).  
-  - `subtractive`: multiplicative model, mimics simple pigment absorption.  
-  - `km`: **Kubelka–Munk–like** model (default), averages absorbance, better for real paints.
+- Mixing is evaluated with the **Mixbox learned latent-space model**, with optional per-pigment darkening for dried-paint behavior.
 
 - The recipe with the lowest **ΔE (Lab color difference)** to the cluster centroid is chosen.
 
@@ -174,8 +170,7 @@ This makes the PDF both a **big-picture reference** and a **step-by-step workboo
   Caps how many different paints appear in one recipe.
 
 - **Mixing model:**  
-  `--mix-model {km,subtractive,lab,linear}` (default: km).  
-  Switch to experiment with different pigment behaviors.
+  The generator always uses the Mixbox learned model for paint recipes.
 
 - **Hide component chips:**  
   `--hide-components` to suppress the right-hand base paint swatches.
@@ -213,7 +208,6 @@ This makes the PDF both a **big-picture reference** and a **step-by-step workboo
      --colors 20 \
      --max-parts 3 \
      --components 3 \
-     --mix-model km \
      --pdf portrait_guide.pdf
    ```
 
