@@ -1,0 +1,12 @@
+Canvas layout pre-check
+Input image: D:\Paint-by-Numbers-Generator\pics\33.jpg
+Canvas: 240 mm x 300 mm
+Image pixels: 2304 x 3072
+Rotation: 0 deg
+Placed artwork: 217.5 mm x 290 mm
+Scale: 0.094401 mm/px
+Configured long-side margin: 5 mm
+Actual left margin: 11.25 mm
+Actual right margin: 11.25 mm
+Actual top margin: 5 mm
+Actual bottom margin: 5 mm
