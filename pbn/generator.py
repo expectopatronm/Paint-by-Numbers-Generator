@@ -33,6 +33,7 @@ from .image_ops import (
     group_value5_exclusive,
     load_external_sketch_gray,
     original_edge_sketch_with_grid,
+    potts_smooth_labels,
     render_image_sketch_gray,
 )
 from .imprimatura import _prev_highlight_rgb, choose_imprimatura_target_from_image
@@ -204,6 +205,19 @@ def main(config: dict | None = None):
     labels_full = Image.fromarray(labels_small, mode="L").resize((orig_w, orig_h), resample=Image.NEAREST)
     labels_full = np.array(labels_full, dtype=np.uint8)
 
+    if bool(getattr(args, "mrf_smoothing", True)):
+        print(
+            "Applying Potts/MRF label smoothing "
+            f"(beta={float(args.mrf_beta)}, iterations={int(args.mrf_iterations)})."
+        )
+        labels_full = potts_smooth_labels(
+            rgb_full,
+            labels_full,
+            centroids_rgb_u8=centroids,
+            beta=float(args.mrf_beta),
+            iterations=int(args.mrf_iterations),
+        )
+
     # Region cleanup
     labels_full = cleanup_label_regions(
         labels_full,
@@ -278,10 +292,8 @@ def main(config: dict | None = None):
 
     approx_uint8 = np.clip(np.rint(np.array(approx_rgbs)), 0, 255).astype(np.uint8)
 
-    # PBN image from MIXED palette
-    seg_mixed_small = approx_uint8[labels_small]
-    pbn_image = Image.fromarray(seg_mixed_small).resize((orig_w, orig_h), resample=Image.NEAREST)
-    pbn_image = np.array(pbn_image, dtype=np.uint8)
+    # PBN image from MIXED palette using the final smoothed/cleaned labels.
+    pbn_image = approx_uint8[labels_full]
 
     # Groupings (exclusive)
     classic = group_classic_exclusive(approx_uint8)

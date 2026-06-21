@@ -141,6 +141,20 @@ DEFAULT_CONFIG = {
     "gmm_n_init": 2,
     "gmm_max_iter": 300,
     "gmm_reg_covar": 1e-6,
+    # mrf_smoothing:
+    #   - If True, apply Potts/MRF smoothing after clustering and label
+    #     upsampling, before tiny-region cleanup and PDF rendering.
+    #   - This reduces isolated speckling while keeping label boundaries
+    #     tied to the original clustered colors.
+    # mrf_beta:
+    #   - Strength of the neighbor-agreement penalty.
+    #   - Higher values smooth more aggressively; lower values preserve
+    #     more fine texture.
+    # mrf_iterations:
+    #   - Number of smoothing passes. Usually 3-6 is enough.
+    "mrf_smoothing": True,
+    "mrf_beta": 7.0,
+    "mrf_iterations": 4,
     # ------------------------------------------------------------------
     # 6) PALETTE & MIXING / RECIPE SEARCH
     # ------------------------------------------------------------------

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+import os
+from collections import deque
+from typing import Dict, List, Tuple
 
 import cv2
 import numpy as np
@@ -475,6 +477,87 @@ def add_grid_to_rgb(arr: np.ndarray, grid_step=80, grid_color=200) -> np.ndarray
 # ---------------------------
 # Region cleanup
 # ---------------------------
+def potts_smooth_labels(
+    rgb_u8: np.ndarray,
+    labels_u8: np.ndarray,
+    *,
+    centroids_rgb_u8: np.ndarray | None = None,
+    beta: float = 7.0,
+    iterations: int = 4,
+) -> np.ndarray:
+    """
+    Smooth a clustered label map with a Potts/MRF-style prior.
+
+    Each pixel keeps a color-fidelity term against the cluster color, while
+    the Potts term rewards agreeing with its 4-neighbors. This removes many
+    isolated speckles without switching to superpixels.
+    """
+    if iterations <= 0 or beta <= 0:
+        return labels_u8
+
+    labels = labels_u8.astype(np.int32, copy=True)
+    label_ids = np.unique(labels)
+    if label_ids.size <= 1:
+        return labels_u8
+
+    rgb = rgb_u8.astype(np.uint8, copy=False)
+    lab_img = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+    if centroids_rgb_u8 is not None:
+        centroids_rgb = np.asarray(centroids_rgb_u8, dtype=np.uint8)
+        centroids_lab = cv2.cvtColor(centroids_rgb.reshape(1, -1, 3), cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
+    else:
+        centroids_lab = np.zeros((int(label_ids.max()) + 1, 3), dtype=np.float32)
+        for label_id in label_ids:
+            mask = labels == int(label_id)
+            if np.any(mask):
+                centroids_lab[int(label_id)] = np.mean(lab_img[mask], axis=0)
+
+    h, w = labels.shape
+    beta = float(beta)
+
+    for _ in range(max(1, int(iterations))):
+        old = labels.copy()
+        best_labels = old.copy()
+        best_energy = np.full((h, w), np.inf, dtype=np.float32)
+
+        up = np.empty_like(old)
+        down = np.empty_like(old)
+        left = np.empty_like(old)
+        right = np.empty_like(old)
+        up[0, :] = old[0, :]
+        up[1:, :] = old[:-1, :]
+        down[-1, :] = old[-1, :]
+        down[:-1, :] = old[1:, :]
+        left[:, 0] = old[:, 0]
+        left[:, 1:] = old[:, :-1]
+        right[:, -1] = old[:, -1]
+        right[:, :-1] = old[:, 1:]
+
+        for label_id in label_ids:
+            lid = int(label_id)
+            if lid >= len(centroids_lab):
+                continue
+            diff = lab_img - centroids_lab[lid]
+            fidelity = np.sqrt(np.sum(diff * diff, axis=2))
+            smooth = (
+                (up != lid).astype(np.float32)
+                + (down != lid).astype(np.float32)
+                + (left != lid).astype(np.float32)
+                + (right != lid).astype(np.float32)
+            )
+            energy = fidelity + beta * smooth
+            take = energy < best_energy
+            best_energy[take] = energy[take]
+            best_labels[take] = lid
+
+        labels = best_labels
+        if np.array_equal(labels, old):
+            break
+
+    return labels.astype(labels_u8.dtype, copy=False)
+
+
 def cleanup_label_regions(labels_u8: np.ndarray, *, min_region_px: int = 0, min_region_pct: float = 0.0) -> np.ndarray:
     """
     Remove/merge impractically small components in the label map:
