@@ -6,6 +6,8 @@ import os
 import time
 import subprocess
 import itertools
+import shutil
+import tempfile
 from types import SimpleNamespace
 from typing import Dict, List, Sequence, Tuple
 from collections import deque
@@ -27,8 +29,14 @@ import mixbox as _mixbox
 import svgwrite
 from skimage.morphology import skeletonize
 from skimage import measure
+from skimage.color import deltaE_ciede2000 as _deltaE_ciede2000
 from sklearn.cluster import KMeans
 from sklearn.mixture import BayesianGaussianMixture, GaussianMixture
+
+try:
+    from colour.difference import delta_E as _colour_delta_E
+except Exception:
+    _colour_delta_E = None
 
 # FG/BG separation (optional)
 import torch
@@ -141,48 +149,54 @@ def rmbg_alpha_matte(input_path: str,
     return matte_u8.astype(np.float32) / 255.0
 
 
-def _choose_scale(longest: int, *,
-                  ok_min: int,
-                  target: int,
-                  choices=(2, 3, 4)) -> int | None:
-    """
-    Pick the smallest scale in `choices` that brings the longest side to at least ok_min,
-    without needing to exceed `target` (we'll clamp down afterwards if we overshoot).
-    Returns None if no upscaling is needed.
-    """
-    if ok_min <= longest < target:
-        return None    # already acceptable per user rule
-    if longest >= target:
-        return None    # already >= 3000 -> don't upscale
-    # Need to upscale from below ok_min
-    for s in sorted(choices):
-        if longest * s >= ok_min:
-            return s
-    return max(choices) if choices else None  # fallback
+def _latest_image_in_tree(root_dir: str, *, after_ts: float) -> str | None:
+    exts = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}
+    candidates = []
+    for base, _dirs, files in os.walk(root_dir):
+        for name in files:
+            path = os.path.join(base, name)
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in exts:
+                continue
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if mtime >= after_ts:
+                candidates.append((mtime, path))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
 
 
-def _maybe_upscale_with_realesrgan(input_path: str,
-                                   *,
-                                   enable: bool,
-                                   ok_min: int,
-                                   target: int | None,
-                                   bin_path: str,
-                                   model_dir: str | None = None,
-                                   model_name: str | None = None,
-                                   choices=(2, 3, 4)) -> str:
+def _maybe_upscale_with_supir(input_path: str,
+                              *,
+                              enable: bool,
+                              ok_min: int,
+                              repo_dir: str,
+                              python_bin: str,
+                              model_dir: str,
+                              supir_sign: str = "Q",
+                              upscale: int = 2,
+                              min_size: int = 1024,
+                              edm_steps: int = 50,
+                              s_noise: float = 1.02,
+                              s_cfg: float = 4.0,
+                              spt_linear_cfg: float = 1.0,
+                              s_stage2: float = 1.0,
+                              color_fix_type: str = "Wavelet",
+                              a_prompt: str = "",
+                              n_prompt: str = "",
+                              ae_dtype: str = "bf16",
+                              diff_dtype: str = "fp16",
+                              no_llava: bool = True,
+                              use_tile_vae: bool = True,
+                              loading_half_params: bool = False,
+                              extra_args: Sequence[str] | None = None) -> str:
     """
-    If enabled and the longest side is < ok_min, upscale with Real-ESRGAN
-    using realesrgan-ncnn-vulkan.
-
-    Args:
-        input_path: Path to input image.
-        enable: Whether to perform upscaling.
-        ok_min: Minimum acceptable longest dimension (px) before upscaling.
-        target: Target longest side (unused here, kept for API compatibility).
-        bin_path: Path to realesrgan-ncnn-vulkan executable.
-        model_dir: Directory containing model .bin/.param files.
-        model_name: Model name (e.g. "realesrgan-x4plus").
-        choices: Allowed upscale factors (default: 2, 3, 4).
+    If enabled and the image is below ok_min, run a local SUPIR checkout.
+    SUPIR is non-commercial-only upstream; this wrapper assumes local personal use.
     """
     if not enable:
         return input_path
@@ -191,49 +205,160 @@ def _maybe_upscale_with_realesrgan(input_path: str,
         with Image.open(input_path) as im:
             w, h = im.size
     except Exception as e:
-        print(f"Could not open input for pre-check: {e}. Skipping upscale.")
-        return input_path
+        raise RuntimeError(f"Could not open input for SUPIR pre-check: {e}") from e
 
     longest = max(w, h)
-
     if longest >= ok_min:
-        print(f"Upscale check: longest={longest}px ≥ {ok_min}px → no upscale.")
+        print(f"SUPIR upscale check: longest={longest}px >= {ok_min}px -> no upscale.")
         return input_path
 
-    # Determine scale factor
-    scale = None
-    for s in sorted(choices):
-        if longest * s >= ok_min:
-            scale = s
-            break
-    if scale is None:
-        scale = max(choices)
+    repo_dir = os.path.abspath(repo_dir)
+    test_py = os.path.join(repo_dir, "test.py")
+    if not os.path.exists(test_py):
+        raise FileNotFoundError(f"SUPIR repo not found at {repo_dir}. Expected {test_py}.")
 
-    root, _ = os.path.splitext(os.path.abspath(input_path))
-    up_path = f"{root}.upx{scale}.png"
+    python_bin = str(python_bin or "python")
+    if python_bin.lower() != "python" and not os.path.isabs(python_bin):
+        python_bin = os.path.abspath(python_bin)
+    model_dir = os.path.abspath(model_dir)
 
-    # Build the command
-    cmd = [str(bin_path), "-s", str(scale), "-i", input_path, "-o", up_path]
-    if model_dir:
-        cmd += ["-m", str(model_dir)]
-    if model_name:
-        cmd += ["-n", str(model_name)]
+    stem = os.path.splitext(os.path.basename(input_path))[0]
+    scale = max(1, int(upscale))
+    root = os.path.splitext(os.path.abspath(input_path))[0]
+    final_path = f"{root}.supirx{scale}.png"
 
-    try:
-        print(f"Running Real-ESRGAN: {' '.join(cmd)}")
-        subprocess.run(cmd, check=True)
-    except Exception as e:
-        print(f"Real-ESRGAN failed ({e}). Using original image.")
+    with tempfile.TemporaryDirectory(prefix="pbn_supir_") as tmp:
+        in_dir = os.path.join(tmp, "input")
+        out_dir = os.path.join(tmp, "output")
+        os.makedirs(in_dir, exist_ok=True)
+        os.makedirs(out_dir, exist_ok=True)
+
+        staged_input = os.path.join(in_dir, os.path.basename(input_path))
+        shutil.copy2(input_path, staged_input)
+
+        env = os.environ.copy()
+        env.setdefault("PYTHONPATH", repo_dir)
+        env.setdefault("SUPIR_MODEL_DIR", model_dir)
+
+        started = time.time()
+        cmd = [
+            python_bin,
+            test_py,
+            "--img_dir", in_dir,
+            "--save_dir", out_dir,
+            "--upscale", str(scale),
+            "--SUPIR_sign", str(supir_sign).upper(),
+            "--min_size", str(int(min_size)),
+            "--edm_steps", str(int(edm_steps)),
+            "--s_noise", str(float(s_noise)),
+            "--s_cfg", str(float(s_cfg)),
+            "--spt_linear_CFG", str(float(spt_linear_cfg)),
+            "--s_stage2", str(float(s_stage2)),
+            "--color_fix_type", str(color_fix_type),
+            "--a_prompt", str(a_prompt),
+            "--n_prompt", str(n_prompt),
+            "--ae_dtype", str(ae_dtype),
+            "--diff_dtype", str(diff_dtype),
+        ]
+        if no_llava:
+            cmd.append("--no_llava")
+        if use_tile_vae:
+            cmd.append("--use_tile_vae")
+        if loading_half_params:
+            cmd.append("--loading_half_params")
+        if extra_args:
+            cmd.extend(str(x) for x in extra_args)
+
+        print(f"Running SUPIR: {' '.join(cmd)}")
+        try:
+            subprocess.run(cmd, cwd=repo_dir, env=env, check=True)
+        except Exception as e:
+            raise RuntimeError(f"SUPIR failed and no original-image fallback is allowed: {e}") from e
+
+        produced = _latest_image_in_tree(out_dir, after_ts=started)
+        if not produced:
+            raise RuntimeError("SUPIR finished but no output image was found; no original-image fallback is allowed.")
+
+        try:
+            Image.open(produced).save(final_path)
+            with Image.open(final_path) as up:
+                uw, uh = up.size
+            print(f"SUPIR upscaled/restored to: {uw}x{uh} -> {final_path}")
+            return final_path
+        except Exception as e:
+            raise RuntimeError(f"Could not preserve SUPIR output; no original-image fallback is allowed: {e}") from e
+
+
+def _maybe_upscale_input(input_path: str, args) -> str:
+    enable = bool(getattr(args, "enable_upscale", True))
+    ok_min = int(getattr(args, "upscale_ok_min_long", 3000))
+
+    if not enable:
         return input_path
 
-    try:
-        with Image.open(up_path) as up:
-            uw, uh = up.size
-        print(f"Upscaled to: {uw}×{uh}")
-    except Exception:
-        print(f"Upscaled (file saved): {up_path}")
+    with Image.open(input_path) as im:
+        longest = max(im.size)
+    upscale_cfg = getattr(args, "supir_upscale", "auto")
+    if str(upscale_cfg).lower() == "auto":
+        scale = 1
+        for candidate in tuple(getattr(args, "supir_upscale_choices", (1, 2, 3, 4))):
+            if longest * int(candidate) >= ok_min:
+                scale = int(candidate)
+                break
+        else:
+            scale = max(int(x) for x in tuple(getattr(args, "supir_upscale_choices", (1, 2, 3, 4))))
+    else:
+        scale = int(upscale_cfg)
 
-    return up_path
+    prioritizing = str(getattr(args, "supir_prioritizing", "Quality")).lower()
+    texture = float(getattr(args, "supir_texture_richness", 1.0))
+    creativity = float(getattr(args, "supir_creativity", 0.0))
+
+    if "quality" in prioritizing:
+        default_s_stage2 = 0.93
+        default_s_cfg = 6.0
+        default_spt_linear_cfg = 3.0
+        default_s_noise = 1.02
+    else:
+        default_s_stage2 = 1.0
+        default_s_cfg = 4.0
+        default_spt_linear_cfg = 1.0
+        default_s_noise = 1.01
+
+    # Match the website intent: texture richness raises perceptual restoration,
+    # creativity raises prompt influence. A blank description plus creativity=0
+    # keeps the result faithful for painting references.
+    default_s_stage2 = float(np.clip(default_s_stage2 - 0.04 * max(0.0, texture - 1.0), 0.75, 1.0))
+    default_s_cfg = float(np.clip(default_s_cfg + creativity * 2.0, 1.0, 10.0))
+
+    result = _maybe_upscale_with_supir(
+        input_path,
+        enable=enable,
+        ok_min=ok_min,
+        repo_dir=str(getattr(args, "supir_repo_dir", "SUPIR")),
+        python_bin=str(getattr(args, "supir_python", os.path.join("venv", "Scripts", "python.exe"))),
+        model_dir=str(getattr(args, "supir_model_dir", "supir_models")),
+        supir_sign=str(getattr(args, "supir_sign", "Q" if "quality" in prioritizing else "F")),
+        upscale=scale,
+        min_size=int(getattr(args, "supir_min_size", 1024)),
+        edm_steps=int(getattr(args, "supir_edm_steps", 50)),
+        s_noise=float(getattr(args, "supir_s_noise", default_s_noise)),
+        s_cfg=float(getattr(args, "supir_s_cfg", default_s_cfg)),
+        spt_linear_cfg=float(getattr(args, "supir_spt_linear_cfg", default_spt_linear_cfg)),
+        s_stage2=float(getattr(args, "supir_s_stage2", default_s_stage2)),
+        color_fix_type=str(getattr(args, "supir_color_fix_type", "Wavelet")),
+        a_prompt=str(getattr(args, "supir_a_prompt", getattr(args, "supir_image_description", ""))),
+        n_prompt=str(getattr(args, "supir_n_prompt", "")),
+        ae_dtype=str(getattr(args, "supir_ae_dtype", "bf16")),
+        diff_dtype=str(getattr(args, "supir_diff_dtype", "fp16")),
+        no_llava=bool(getattr(args, "supir_no_llava", True)),
+        use_tile_vae=bool(getattr(args, "supir_use_tile_vae", True)),
+        loading_half_params=bool(getattr(args, "supir_loading_half_params", False)),
+        extra_args=list(getattr(args, "supir_extra_args", []) or []),
+    )
+    if result == input_path and longest < ok_min:
+        raise RuntimeError("SUPIR did not produce an upscaled image; no original-image fallback is allowed.")
+    return result
 
 
 def _entries_to_vec(entries: List[Tuple[str,int]], base_order: List[str]) -> np.ndarray:
@@ -361,6 +486,7 @@ def _levels_from_parents(parent: dict[int, int|None]) -> dict[int,int]:
     for i in parent.keys():
         rec(i)
     return lvl
+
 
 def draw_build_graph_page(approx_rgb_uint8: np.ndarray,
                           parent: dict[int, int|None],
@@ -563,9 +689,25 @@ def Lstar_from_rgb(rgb_u8: Sequence[int]) -> float:
 
 
 def deltaE_lab(rgb1_u8: Sequence[int], rgb2_u8: Sequence[int]) -> float:
-    """Compute ΔE*ab between two sRGB uint8 colors."""
-    return float(np.linalg.norm(rgb8_to_lab(np.array(rgb1_u8, dtype=np.float32)) -
-                                rgb8_to_lab(np.array(rgb2_u8, dtype=np.float32))))
+    """Compute perceptual Delta E using the configured color-science backend."""
+    lab1 = rgb8_to_lab(np.array(rgb1_u8, dtype=np.float32))
+    lab2 = rgb8_to_lab(np.array(rgb2_u8, dtype=np.float32))
+    method = str(globals().get("DELTA_E_METHOD", "colour_ciede2000")).lower()
+
+    if method in ("cie76", "deltae76", "lab", "euclidean"):
+        return float(np.linalg.norm(lab1 - lab2))
+
+    if method in ("colour", "colour_ciede2000", "colour-science", "colour-science_ciede2000"):
+        if _colour_delta_E is not None:
+            try:
+                return float(_colour_delta_E(lab1, lab2, method="CIE 2000"))
+            except Exception:
+                pass
+
+    try:
+        return float(_deltaE_ciede2000(lab1[np.newaxis, :], lab2[np.newaxis, :])[0])
+    except Exception:
+        return float(np.linalg.norm(lab1 - lab2))
 
 
 def rgb_to_hsv(rgb: Sequence[int]) -> Tuple[float, float, float]:
@@ -1190,6 +1332,69 @@ def pencil_readable_norm(
     return float01_to_u8(pencil)
 
 
+def plotter_detail_line_sketch(
+    bgr: np.ndarray,
+    *,
+    edge_percentile: float = 90.0,
+    detail_percentile: float = 90.0,
+    min_component_px: int = 1000,
+    line_px: int = 1,
+) -> np.ndarray:
+    """
+    High-recall line art for pen plotter transfer.
+
+    This intentionally avoids tonal shading. It extracts strong ink ridges
+    from the legacy image sketch, removes short fragments, then skeletonizes
+    the result into thin black paths on white.
+    """
+    edge_pct = float(np.clip(edge_percentile, 55, 96))
+    detail_pct = float(np.clip(detail_percentile, 75, 98.5))
+
+    gray = ensure_gray(bgr)
+    h, w = gray.shape[:2]
+    legacy = pencil_readable_norm(
+        bgr,
+        sketchiness01=0.95,
+        softness01=0.05,
+        texture_suppression01=0.35,
+        despeckle01=0.65,
+        stroke01=0.02,
+        canny_high_pct=max(60, min(96, edge_pct)),
+    )
+    ink_strength = 255 - legacy
+    nz = ink_strength[ink_strength > 0]
+    edge_bool = ink_strength >= np.percentile(nz, detail_pct) if nz.size else np.zeros_like(legacy, dtype=bool)
+
+    edge_u8 = edge_bool.astype(np.uint8) * 255
+    if min_component_px > 0:
+        edge_u8 = remove_small_components_bool(edge_u8, int(min_component_px))
+
+    thin = skeletonize(edge_u8 > 0)
+    out = np.full((h, w), 255, dtype=np.uint8)
+    out[thin] = 0
+    if line_px > 1:
+        ink = (out == 0).astype(np.uint8) * 255
+        ink = cv2.dilate(ink, np.ones((int(line_px), int(line_px)), np.uint8), 1)
+        out = np.where(ink > 0, 0, 255).astype(np.uint8)
+    return out
+
+
+def render_image_sketch_gray(bgr: np.ndarray, args=None, **kwargs) -> np.ndarray:
+    mode = str(getattr(args, "image_sketch_mode", kwargs.pop("image_sketch_mode", "plotter"))).lower()
+    edge_pct = float(getattr(args, "edge_percentile", kwargs.pop("canny_high_pct", 90.0)))
+    if mode == "legacy":
+        return pencil_readable_norm(bgr, canny_high_pct=edge_pct, **kwargs)
+    if mode == "plotter":
+        return plotter_detail_line_sketch(
+            bgr,
+            edge_percentile=float(getattr(args, "plotter_edge_percentile", 90.0)),
+            detail_percentile=float(getattr(args, "plotter_detail_percentile", 90.0)),
+            min_component_px=int(getattr(args, "plotter_min_component_px", 1000)),
+            line_px=int(getattr(args, "plotter_line_px", 1)),
+        )
+    return pencil_readable_norm(bgr, canny_high_pct=edge_pct, **kwargs)
+
+
 def original_edge_sketch_with_grid(img_pil: Image.Image, grid_step=80, grid_color=200, **pencil_kwargs) -> Image.Image:
     """
     Legacy helper: produce the OLD pencil sketch and draw a crisp grid on top.
@@ -1197,24 +1402,34 @@ def original_edge_sketch_with_grid(img_pil: Image.Image, grid_step=80, grid_colo
     """
     rgb = np.array(img_pil.convert("RGB"))
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    sketch_u8 = pencil_readable_norm(bgr, **pencil_kwargs)  # grayscale uint8
+    sketch_u8 = render_image_sketch_gray(bgr, **pencil_kwargs)  # grayscale uint8
     rgb_sketch = cv2.cvtColor(sketch_u8, cv2.COLOR_GRAY2RGB)
     rgb_with_grid = add_grid_to_rgb(rgb_sketch, grid_step=grid_step, grid_color=grid_color)
     gray_with_grid = cv2.cvtColor(rgb_with_grid, cv2.COLOR_RGB2GRAY)
     return Image.fromarray(gray_with_grid, mode="L")
 
-# ---------------------------
-# Label-based OUTLINE + numbering (NEW)
-# ---------------------------
-def label_boundaries_u8(labels_u8: np.ndarray, thick_px: int = 1) -> np.ndarray:
-    """Compute region boundaries from a label map; returns binary uint8 mask."""
-    up = np.zeros_like(labels_u8); up[1:] = (labels_u8[1:] != labels_u8[:-1])
-    left = np.zeros_like(labels_u8); left[:, 1:] = (labels_u8[:, 1:] != labels_u8[:, :-1])
-    edges = np.logical_or(up, left).astype(np.uint8) * 255
-    if thick_px > 1:
-        edges = cv2.dilate(edges, np.ones((thick_px, thick_px), np.uint8), 1)
-    return edges
 
+def load_external_sketch_gray(sketch_path: str, size: tuple[int, int]) -> np.ndarray:
+    """
+    Load a user-supplied sketch/stencil image as grayscale uint8, resized to
+    match the working image size. Black lines on white paper are expected.
+    """
+    if not sketch_path:
+        raise ValueError("External sketch path is empty.")
+    if not os.path.exists(sketch_path):
+        raise FileNotFoundError(f"External sketch file not found: {sketch_path}")
+
+    with Image.open(sketch_path) as im:
+        im = ImageOps.exif_transpose(im)
+        if im.mode in ("RGBA", "LA"):
+            bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
+            bg.alpha_composite(im.convert("RGBA"))
+            im = bg.convert("L")
+        else:
+            im = im.convert("L")
+        if im.size != size:
+            im = im.resize(size, resample=Image.BILINEAR)
+        return np.array(im, dtype=np.uint8)
 
 def add_grid_to_rgb(arr: np.ndarray, grid_step=80, grid_color=200) -> np.ndarray:
     """Overlay a grid onto an RGB uint8 image array, non-destructively."""
@@ -1263,6 +1478,7 @@ def cleanup_label_regions(labels_u8: np.ndarray, *, min_region_px: int = 0, min_
             labels[comp_mask.astype(bool)] = new_lab
 
     return labels
+
 
 # ---------------------------
 # Color key drawer
@@ -1365,6 +1581,30 @@ def _gray_int_to_hex(c: int) -> str:
     h = f"{c:02X}"
     return f"#{h}{h}{h}"
 
+
+def _save_svg_atomic(dwg, output_path: str) -> str:
+    """
+    Save an svgwrite Drawing through a temporary file, then replace the target.
+    This is more reliable on Windows than opening an existing large SVG directly.
+    """
+    out = os.path.abspath(os.fspath(output_path))
+    out_dir = os.path.dirname(out) or os.getcwd()
+    os.makedirs(out_dir, exist_ok=True)
+
+    fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".svg", dir=out_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fileobj:
+            dwg.write(fileobj)
+        os.replace(tmp, out)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return out
+
+
 def run_centerline_trace(args):
     """
     Generate a single-stroke centerline SVG from the final clean stencil outline,
@@ -1405,8 +1645,10 @@ def run_centerline_trace(args):
     contours = measure.find_contours(skel, 0.5)
     h, w = skel.shape
 
+    centerline_output = os.path.abspath(os.fspath(args.centerline_output))
+
     # Prepare SVG
-    dwg = svgwrite.Drawing(args.centerline_output, size=(w, h))
+    dwg = svgwrite.Drawing(centerline_output, size=(w, h))
     # Optional: white background rect, if you prefer explicit white:
     # dwg.add(dwg.rect(insert=(0, 0), size=(w, h), fill="#FFFFFF"))
 
@@ -1441,8 +1683,8 @@ def run_centerline_trace(args):
         dwg.add(dwg.polyline(points=pts, fill="none", stroke="black", stroke_width=0.1))
 
     # Save SVG
-    dwg.save()
-    print(f"Centerline SVG with grid saved: {args.centerline_output} (blur={args.centerline_blur}, simplify={args.centerline_simplify}, grid_step={grid_step})")
+    saved_centerline = _save_svg_atomic(dwg, centerline_output)
+    print(f"Centerline SVG with grid saved: {saved_centerline} (blur={args.centerline_blur}, simplify={args.centerline_simplify}, grid_step={grid_step})")
 
     # ----------------------------------------------------
     # B) PAPER CANVAS SVG (portrait, mm) — scale+center the
@@ -1452,8 +1694,9 @@ def run_centerline_trace(args):
     Wmm, Hmm = float(dims[0]), float(dims[1])
 
     canvas_out = getattr(args, "centerline_canvas_output", None) or (
-            os.path.splitext(args.centerline_output)[0] + "_canvas.svg"
+            os.path.splitext(centerline_output)[0] + "_canvas.svg"
     )
+    canvas_out = os.path.abspath(os.fspath(canvas_out))
 
     from svgwrite import Drawing
     dwg_mm = Drawing(canvas_out, size=(f"{Wmm}mm", f"{Hmm}mm"), viewBox=f"0 0 {Wmm} {Hmm}")
@@ -1535,8 +1778,8 @@ def run_centerline_trace(args):
         root.add(dwg_mm.polyline(points=pts, fill="none", stroke="black", stroke_width=0.1))
 
     dwg_mm.add(root)
-    dwg_mm.save()
-    print(f"Centerline canvas SVG saved: {canvas_out} (paper {Wmm}×{Hmm} mm, s={s:.4f}, rot={rot}°)")
+    saved_canvas = _save_svg_atomic(dwg_mm, canvas_out)
+    print(f"Centerline canvas SVG saved: {saved_canvas} (paper {Wmm}×{Hmm} mm, s={s:.4f}, rot={rot}°)")
 
     # Optional: vpype optimization for the canvas file
     try:
@@ -1564,16 +1807,19 @@ BASE_PALETTE = None
 STRENGTH = None
 USE_TINTING_STRENGTH = False  # <--- add
 DARKEN_PER_PIGMENT = None      # <--- add this line
+DELTA_E_METHOD = "colour_ciede2000"
 
-def _init_worker(palette_dict, strength_dict, darken_dict, use_tinting_strength_flag: bool):
+def _init_worker(palette_dict, strength_dict, darken_dict, use_tinting_strength_flag: bool,
+                 delta_e_method: str = "colour_ciede2000"):
     """
     Install palette/strength in worker globals.
     """
-    global BASE_PALETTE, STRENGTH, USE_TINTING_STRENGTH, DARKEN_PER_PIGMENT
+    global BASE_PALETTE, STRENGTH, USE_TINTING_STRENGTH, DARKEN_PER_PIGMENT, DELTA_E_METHOD
     BASE_PALETTE = palette_dict
     STRENGTH = strength_dict
     DARKEN_PER_PIGMENT = darken_dict     # <--- set here
     USE_TINTING_STRENGTH = bool(use_tinting_strength_flag)
+    DELTA_E_METHOD = str(delta_e_method)
 
 
 def _recipe_worker(color_rgb_list,
@@ -1719,31 +1965,25 @@ def main(config: dict | None = None):
     Run the generator using a dict-based config.
     Pass only the keys you want to override; unspecified keys use DEFAULT_CONFIG.
     """
-    global BASE_PALETTE, STRENGTH, USE_TINTING_STRENGTH
+    global BASE_PALETTE, STRENGTH, USE_TINTING_STRENGTH, DELTA_E_METHOD
 
     t0 = time.perf_counter()  # <<< start timer
 
     cfg = {**DEFAULT_CONFIG, **(config or {})}
     args = SimpleNamespace(**cfg)
 
-    # --- NEW: pre-upscale gate ---
-    args.input = _maybe_upscale_with_realesrgan(
-        args.input,
-        enable=bool(getattr(args, "enable_upscale", True)),
-        ok_min=int(getattr(args, "upscale_ok_min_long", 2500)),
-        target=None,
-        bin_path=str(getattr(args, "realesrgan_bin", "realesrgan-ncnn-vulkan")),
-        model_dir=str(getattr(args, "realesrgan_model_dir", "")),
-        model_name=str(getattr(args, "realesrgan_model_name", "")),
-        choices=tuple(getattr(args, "realesrgan_scale_choices", (2, 3, 4))),
-    )
+    # --- Pre-upscale / restoration gate ---
+    args.input = _maybe_upscale_input(args.input, args)
 
     # set global toggle from config (existing)
     USE_TINTING_STRENGTH = bool(args.use_tinting_strength)
+    DELTA_E_METHOD = str(getattr(args, "delta_e_method", "colour_ciede2000"))
 
-    # Map the alias onto outline-mode (existing)
+    # Map the alias onto outline-mode (label-boundary modes were removed).
     if args.sketch_style:
-        args.outline_mode = {"old": "image", "new": "labels", "both": "both"}[args.sketch_style]
+        if str(args.sketch_style).lower() not in ("old", "image"):
+            print(f"sketch_style={args.sketch_style!r} is deprecated; using image sketch instead.")
+        args.outline_mode = "image"
 
     # -------------------------
     # Load twice: one for OUTLINE (no pre-brighten), one for COLORING (pre-brighten)
@@ -1898,7 +2138,13 @@ def main(config: dict | None = None):
         with ProcessPoolExecutor(
                 max_workers=max_workers,
                 initializer=_init_worker,
-                initargs=(BASE_PALETTE, STRENGTH, DARKEN_PER_PIGMENT, bool(args.use_tinting_strength)),  # <--- new
+                initargs=(
+                    BASE_PALETTE,
+                    STRENGTH,
+                    DARKEN_PER_PIGMENT,
+                    bool(args.use_tinting_strength),
+                    str(args.delta_e_method),
+                ),
         ) as ex:
             for c in centroids_list:
                 fut = ex.submit(
@@ -2019,32 +2265,17 @@ def main(config: dict | None = None):
     tweaks = build_value_tweaks(approx_uint8, all_recipes, threshold=0.25)
 
     # -------------------------
-    # Outline prep (OLD: image edges) and/or (NEW: label boundaries)
+    # Outline prep (external sketch or image-edge sketch)
     # -------------------------
-    if args.outline_mode in ("image", "both"):
-        sketch_gray = pencil_readable_norm(
-            bgr_outline_full, canny_high_pct=float(args.edge_percentile)
-        )
+    uses_external_sketch = bool(getattr(args, "external_sketch", None))
+    if uses_external_sketch:
+        external_sketch_path = str(getattr(args, "external_sketch"))
+        outline_gray = load_external_sketch_gray(external_sketch_path, (orig_w, orig_h))
+        sketch_gray = outline_gray
+        print(f"Using external sketch file: {external_sketch_path}")
     else:
-        sketch_gray = None
-
-    if args.outline_mode in ("labels", "both"):
-        boundaries = label_boundaries_u8(labels_full, thick_px=1)
-        bound_norm = (boundaries.astype(np.float32) / 255.0)
-        label_outline_gray = float01_to_u8(1.0 - bound_norm * 0.85)
-    else:
-        label_outline_gray = None
-
-    if args.outline_mode == "image":
-        outline_gray = sketch_gray
-    elif args.outline_mode == "labels":
-        outline_gray = label_outline_gray
-    else:
-        if sketch_gray is None: outline_gray = label_outline_gray
-        elif label_outline_gray is None: outline_gray = sketch_gray
-        else:
-            a = im2float01(sketch_gray); b = im2float01(label_outline_gray)
-            outline_gray = float01_to_u8(np.clip(a * b, 0, 1))
+        outline_gray = render_image_sketch_gray(bgr_outline_full, args)
+        sketch_gray = outline_gray
 
     # Optional clean-stencil post-processing of the outline
     if outline_gray is not None and args.apply_clean_stencil:
@@ -2149,11 +2380,7 @@ def main(config: dict | None = None):
                 # Show the post-processed (clean) stencil with the grid
                 ref_rgb = cv2.cvtColor(outline_gray, cv2.COLOR_GRAY2RGB)
                 ref_with_grid = add_grid_to_rgb(ref_rgb, grid_step=args.grid_step, grid_color=200)
-                mode_tag = (
-                    "labels" if args.outline_mode == "labels"
-                    else "combined" if args.outline_mode == "both"
-                    else "image"
-                )
+                mode_tag = "external" if uses_external_sketch else "image"
                 ax.imshow(ref_with_grid)
                 ax.set_title(f"Clean Stencil Outline + Grid ({mode_tag}) (step={args.grid_step}px)", pad=2)
                 ax.axis("off")
@@ -2163,24 +2390,25 @@ def main(config: dict | None = None):
             else:
                 # Legacy behavior (no clean stencil): keep the old special page for image-edges;
                 # otherwise show the raw outline/combined outline.
-                if args.outline_mode == "image":
-                    legacy_page = original_edge_sketch_with_grid(            img_outline, grid_step=args.grid_step, grid_color=200,
-                        canny_high_pct=float(args.edge_percentile)
-                    )
-
-                    ax.imshow(legacy_page, cmap='gray')
-                    ax.set_title(f"Original Edge Sketch + Grid (step={args.grid_step}px)", pad=2)
+                if uses_external_sketch:
+                    ref_rgb = cv2.cvtColor(outline_gray, cv2.COLOR_GRAY2RGB)
+                    ref_with_grid = add_grid_to_rgb(ref_rgb, grid_step=args.grid_step, grid_color=200)
+                    ax.imshow(ref_with_grid)
+                    ax.set_title(f"External Sketch + Grid (step={args.grid_step}px)", pad=2)
                     ax.axis("off")
                     pdf.savefig(fig, dpi=300);
                     plt.close(fig)
                 else:
-                    ref_rgb = cv2.cvtColor(outline_gray, cv2.COLOR_GRAY2RGB)
-                    ref_with_grid = add_grid_to_rgb(ref_rgb, grid_step=args.grid_step, grid_color=200)
-                    ax.imshow(ref_with_grid)
-                    ax.set_title(
-                        f"Outline + Grid ({'labels' if args.outline_mode == 'labels' else 'combined'}) "
-                        f"(step={args.grid_step}px)", pad=2
+                    legacy_page = original_edge_sketch_with_grid(
+                        img_outline,
+                        grid_step=args.grid_step,
+                        grid_color=200,
+                        image_sketch_mode=str(args.image_sketch_mode),
+                        canny_high_pct=float(args.edge_percentile),
                     )
+
+                    ax.imshow(legacy_page, cmap='gray')
+                    ax.set_title(f"Original Edge Sketch + Grid (step={args.grid_step}px)", pad=2)
                     ax.axis("off")
                     pdf.savefig(fig, dpi=300);
                     plt.close(fig)
@@ -2575,12 +2803,12 @@ if __name__ == "__main__":
         "indian_yellow": 1.0,
         "olive_green": 1.0,
         "yellow_ochre": 1.0,
-        "burnt_sienna": 0.75,
-        "burnt_umber": 0.75,
-        # "indigo": 0.75,
-        "ivory_black": 0.75,
-        "paynes_gray": 0.75,
-        "vandyke_brown": 0.75,
+        "burnt_sienna": 1.0,
+        "burnt_umber": 1.0,
+        # "indigo": 1.0,
+        "ivory_black": 1.0,
+        "paynes_gray": 1.0,
+        "vandyke_brown": 1.0,
     }
 
     # Tinting strength multipliers: how strongly each pigment “tints” per unit part.
@@ -2596,16 +2824,16 @@ if __name__ == "__main__":
         # "Lamp Black": 2.5,
 
         # New Schmincke Norma colors
-        "Yellow Ochre": 0.7,
-        "Cobalt Blue Hue": 0.9,  # moderate tinting, weaker than Phthalo
-        "Payne's Grey": 1.5,  # quite strong because of black + blue mix
-        "Ivory Black": 2.3,  # slightly less strong than Lamp Black
-        "Indian Yellow": 1.2,  # transparent and strong tint
-        "Alizarin Crimson Hue": 1.3,  # deep tint, transparent
+        "Yellow Ochre": 1.0,
+        "Cobalt Blue Hue": 1.0,  # moderate tinting, weaker than Phthalo
+        "Payne's Grey": 1.0,  # quite strong because of black + blue mix
+        "Ivory Black": 1.0,  # slightly less strong than Lamp Black
+        "Indian Yellow": 1.0,  # transparent and strong tint
+        "Alizarin Crimson Hue": 1.0,  # deep tint, transparent
         "Vandyke Brown": 1.0,  # moderate tinting, earthy
-        "Olive Green": 1.1,  # moderate tint, earthy but fairly strong
+        "Olive Green": 1.0,  # moderate tint, earthy but fairly strong
         "Burnt Umber": 1.0,
-        "Burnt Sienna": 0.8,
+        "Burnt Sienna": 1.0,
     }
 
     # ---------------------------
@@ -2634,8 +2862,16 @@ if __name__ == "__main__":
         #   - Can be overridden per-call via config.
         # pdf:
         #   - Output filename for the multi-page A4 landscape PDF guide.
-        "input": "pics/27.jpg",
+        # external_sketch:
+        #   - Optional path to a user-supplied sketch/stencil image.
+        #   - When set, this grayscale image is resized to the source image
+        #     size and used anywhere the generated outline/sketch would be
+        #     used: outline page, frame underlay, per-color underlay, and
+        #     centerline SVG tracing.
+        #   - Use black/dark lines on a white/light background.
+        "input": "pics/33.jpg",
         "pdf": "paint_by_numbers_guide.pdf",
+        "external_sketch": "pics/33_sketch.png",
         # ------------------------------------------------------------------
         # 3) CANVAS GEOMETRY & PRINT LAYOUT (FOR CENTERLINE SVG CANVAS)
         # ------------------------------------------------------------------
@@ -2651,8 +2887,8 @@ if __name__ == "__main__":
         #   - Rotation applied when placing the pixel artwork onto the canvas
         #     for the centerline SVG.
         #   - Supported values: 0 or 90 degrees (others are clamped to 0).
-        "canvas_dimensions_mm": (300, 400),
-        "canvas_long_margin_mm": 10.0,
+        "canvas_dimensions_mm": (240, 300),
+        "canvas_long_margin_mm": 5.0,
         "canvas_rotation_deg": 0,
         # ------------------------------------------------------------------
         # 4) GLOBAL GRID SETTINGS (USED ON PDF PAGES & SVG GRID)
@@ -2685,7 +2921,7 @@ if __name__ == "__main__":
         #     "kmeans" → standard KMeans on features.
         #     "bgmm"   → Bayesian Gaussian Mixture Model with a Dirichlet
         #                Process prior (effective cluster count may be < colors).
-        "colors": 30,
+        "colors": 15,
         "resize": None,  # e.g. (W, H)
         "cluster_space": "lab",  # {"lab", "rgb"}
         "cluster_algo": "kmeans",  # {"kmeans", "bgmm", "gmm"}
@@ -2725,6 +2961,12 @@ if __name__ == "__main__":
         "max_parts": 10,
         "mix_model": "learned",  # {"km", "learned"}
         "use_tinting_strength": False,
+        # delta_e_method:
+        #   - "colour_ciede2000" uses the colour-science implementation of
+        #     CIEDE2000 for recipe scoring (default).
+        #   - "skimage_ciede2000" uses scikit-image's CIEDE2000.
+        #   - "cie76" uses plain Euclidean Lab distance for old comparisons.
+        "delta_e_method": "colour_ciede2000",  # {"colour_ciede2000", "skimage_ciede2000", "cie76"}
         # ------------------------------------------------------------------
         # 7) FRAME SEQUENCING / HIGH-LEVEL PAINT ORDER
         # ------------------------------------------------------------------
@@ -2753,7 +2995,7 @@ if __name__ == "__main__":
         #         - "stepwise" otherwise (kept for backward-compat).
         "frame_mode": "combined",  # {"classic", "value5", "both", "combined"}
         "per_color_frames": True,
-        "per_color_order_mode": "adjacent",
+        "per_color_order_mode": "stepwise",
         # ------------------------------------------------------------------
         # 8) COLOR-KEY RENDERING & TEXT LAYOUT
         # ------------------------------------------------------------------
@@ -2775,16 +3017,19 @@ if __name__ == "__main__":
         #   - Percentile used to determine high Canny thresholds from gradient
         #     magnitudes in the OLD edge-based sketch pipeline.
         #   - Higher values → fewer, stronger edges.
+        # image_sketch_mode:
+        #   - "plotter" -> detailed binary line art for pen plotting.
+        #   - "legacy"  -> old tonal pencil sketch.
+        # plotter_*:
+        #   - Lower percentiles keep more detail; higher values simplify.
+        #   - line_px should usually stay 1 for SVG/plotter centerlines.
         # outline_mode:
         #   - How to compute the outline passed into the PDF pages:
-        #       "image"  → OLD method based on image edges / pencil sketch.
-        #       "labels" → NEW method based on label boundaries only.
-        #       "both"   → Combine image edges and label boundaries.
+        #       "image" → method based on image edges / pencil sketch.
+        #   - Label-boundary/closed-region outline generation has been removed.
         # sketch_style:
         #   - High-level alias that overrides outline_mode when set:
-        #       "old"   → outline_mode="image"
-        #       "new"   → outline_mode="labels"
-        #       "both"  → outline_mode="both"
+        #       "old" → outline_mode="image"
         #   - None → use outline_mode directly.
         # sketch_alpha:
         #   - Blending factor (0..1) when multiply-blending the outline
@@ -2792,8 +3037,13 @@ if __name__ == "__main__":
         #       0.0 → outline disabled in frames.
         #       1.0 → strong ink-like multiplication.
         "edge_percentile": 90.0,
+        "image_sketch_mode": "plotter",  # {"plotter", "legacy"}
+        "plotter_edge_percentile": 90.0,
+        "plotter_detail_percentile": 90.0,
+        "plotter_min_component_px": 1000,
+        "plotter_line_px": 1,
         "outline_mode": "image",
-        "sketch_style": None,  # {"old", "new", "both"}; overrides outline_mode
+        "sketch_style": None,  # {"old"}; overrides outline_mode
         "sketch_alpha": 0.25,
         # ------------------------------------------------------------------
         # 10) PER-COLOR PAGE ACCUMULATION / PREVIOUS-AREA HIGHLIGHTING
@@ -2842,7 +3092,7 @@ if __name__ == "__main__":
         #   - If True, apply an adaptive threshold + light erosion pipeline
         #     to produce a crisp, printable stencil from the outline_gray
         #     image, followed by brightness/sharpness adjustments.
-        #   - If False, use the raw outline_gray (image/labels/both).
+        #   - If False, use the raw outline_gray.
         # stencil_brightness:
         #   - Slider value in 0..1 for brightness adjustment of the stencil
         #     (mapped internally to a 0.5..2.0 factor).
@@ -2855,7 +3105,7 @@ if __name__ == "__main__":
         # stencil_C:
         #   - Bias term (C) for cv2.adaptiveThreshold. Higher values usually
         #     produce slightly lighter stencils (fewer black pixels).
-        "apply_clean_stencil": True,
+        "apply_clean_stencil": False,
         "stencil_brightness": 1.0,  # sliders 0..1 (mapped internally)
         "stencil_sharpness": 1.0,
         "stencil_block_size": 11,
@@ -2898,35 +3148,50 @@ if __name__ == "__main__":
         "build_min_added_fraction": 0.05,
         "build_max_chain_depth": 4,
         "build_parent_choice": "min_added_parts",
-        "build_graph_page": True,
+        "build_graph_page": False,
         # ------------------------------------------------------------------
-        # 14) REAL-ESRGAN PRE-UPSCALE (OPTIONAL)
+        # 14) SUPIR PRE-UPSCALE
         # ------------------------------------------------------------------
         # enable_upscale:
-        #   - If True, run Real-ESRGAN (realesrgan-ncnn-vulkan) as a
-        #     pre-processing step when the image is “too small”.
+        #   - If True, run SUPIR as a pre-processing step when the image is
+        #     too small.
+        #   - For undersized images, SUPIR failures stop processing instead
+        #     of falling back to the original image.
         #   - If False, do not attempt upscaling.
         # upscale_ok_min_long:
         #   - Minimum acceptable longest side (in pixels) for the input image.
-        #   - If longest_side >= this value → NO upscaling is performed.
-        #   - If longest_side < this value → choose a scale from
-        #     realesrgan_scale_choices that brings the longest side above
-        #     this threshold.
-        # realesrgan_bin:
-        #   - Path to the realesrgan-ncnn-vulkan executable.
-        # realesrgan_model_dir:
-        #   - Directory containing the .bin/.param Real-ESRGAN model files.
-        # realesrgan_model_name:
-        #   - Model name passed to the binary (e.g. "realesrgan-x4plus").
-        # realesrgan_scale_choices:
-        #   - Allowed integer upscaling factors; the smallest scale that
-        #     satisfies the ok_min requirement is chosen, or the max if none.
-        "enable_upscale": False,
+        #   - If longest_side >= this value, no upscaling is performed.
+        #   - If longest_side < this value, SUPIR chooses the smallest
+        #     supir_upscale_choices factor that reaches the threshold.
+        "enable_upscale": True,
         "upscale_ok_min_long": 3000,
-        "realesrgan_bin": "realesrgan-ncnn-vulkan-20220424-windows/realesrgan-ncnn-vulkan.exe",
-        "realesrgan_model_dir": "realesrgan-ncnn-vulkan-20220424-windows/models",
-        "realesrgan_model_name": "realesrgan-x4plus",
-        "realesrgan_scale_choices": (2, 3, 4),
+        "supir_repo_dir": "SUPIR",
+        "supir_python": "venv/Scripts/python.exe",
+        "supir_model_dir": "supir_models",
+        "supir_engine": "SUPIR",
+        "supir_sampler": "Ultimate Perception",
+        "supir_prioritizing": "Quality",
+        "supir_texture_richness": 1.0,
+        "supir_creativity": 0.0,
+        "supir_image_description": "",
+        "supir_sign": "Q",  # {"Q", "F"}; Q = general quality, F = lighter degradation fidelity
+        "supir_upscale": "auto",
+        "supir_upscale_choices": (1, 2, 3, 4),
+        "supir_min_size": 1024,
+        "supir_edm_steps": 50,
+        "supir_s_noise": 1.02,
+        "supir_s_cfg": 6.0,
+        "supir_spt_linear_cfg": 3.0,
+        "supir_s_stage2": 0.93,
+        "supir_color_fix_type": "Wavelet",  # {"None", "AdaIn", "Wavelet"}
+        "supir_a_prompt": "",
+        "supir_n_prompt": "",
+        "supir_ae_dtype": "bf16",
+        "supir_diff_dtype": "fp16",
+        "supir_no_llava": True,
+        "supir_use_tile_vae": True,
+        "supir_loading_half_params": False,
+        "supir_extra_args": [],
         # ------------------------------------------------------------------
         # 15) PRE-BRIGHTENING (BEFORE CLUSTERING / COLORING)
         # ------------------------------------------------------------------
@@ -2936,7 +3201,7 @@ if __name__ == "__main__":
         #   - 0   → no change.
         #   - 1–100 → mapped to a factor ~= 1.0–2.0 depending on the
         #             internal slider mapping.
-        "pre_brighten_pct": 5,
+        "pre_brighten_pct": 0,
         # ------------------------------------------------------------------
         # 16) IMPRIMATURA (TONED GROUND) SELECTION
         # ------------------------------------------------------------------
@@ -3016,3 +3281,4 @@ if __name__ == "__main__":
     }
 
     main()
+
