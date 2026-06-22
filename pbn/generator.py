@@ -493,9 +493,6 @@ def main(config: dict | None = None):
         # -------------------------
         if args.per_color_frames:
 
-            # Reference image shown on every per-color page (top-right)
-            pbn_reference_with_grid = add_grid_to_rgb(pbn_image, grid_step=args.grid_step, grid_color=200)
-
             # Ensure multiply-underlay factor if outline exists (unchanged)
             a = float(np.clip(args.sketch_alpha, 0.0, 1.0))
             if sketch_factor_rgb is None and outline_gray is not None:
@@ -504,6 +501,15 @@ def main(config: dict | None = None):
 
             H, W = labels_full.shape
             area = np.array([(labels_full == i).sum() for i in range(args.colors)], dtype=np.int64)
+
+            def painting_so_far_with_grid(done_mask: np.ndarray) -> np.ndarray:
+                progress_rgb = np.full_like(pbn_image, 255, dtype=np.uint8)
+                if done_mask.any():
+                    progress_rgb[done_mask] = pbn_image[done_mask]
+                if sketch_factor_rgb is not None:
+                    progress_f = np.clip(progress_rgb.astype(np.float32) / 255.0, 0.0, 1.0)
+                    progress_rgb = (np.clip(progress_f * sketch_factor_rgb, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+                return add_grid_to_rgb(progress_rgb, grid_step=args.grid_step, grid_color=200)
 
             # --- Decide per-color order mode ---
             order_mode = getattr(args, "per_color_order_mode")
@@ -614,9 +620,9 @@ def main(config: dict | None = None):
                         )
                         axL.axis("off")
 
-                        # Top-right: full clustered image (reference)
-                        axRT.imshow(pbn_reference_with_grid)
-                        axRT.set_title("Clustered image (reference)", fontsize=9, pad=4)
+                        # Top-right: completed painting before this page's color is applied
+                        axRT.imshow(painting_so_far_with_grid(prev_mask))
+                        axRT.set_title("Painting so far", fontsize=9, pad=4)
                         axRT.axis("off")
 
                         # Bottom-right: existing color key panel
@@ -700,7 +706,7 @@ def main(config: dict | None = None):
                     )
 
                     axL = fig.add_subplot(gs[:, 0])  # left spans both rows
-                    axRT = fig.add_subplot(gs[0, 1])  # top-right: full clustered reference
+                    axRT = fig.add_subplot(gs[0, 1])  # top-right: painting completed before this page
                     axRB = fig.add_subplot(gs[1, 1])  # bottom-right: existing panel (color key)
 
                     # Left: current per-color frame
@@ -710,9 +716,9 @@ def main(config: dict | None = None):
                                    f"{'(outline multiply underlay)' if sketch_factor_rgb is not None else ''}"), pad=2)
                     axL.axis("off")
 
-                    # Top-right: full clustered image (reference)
-                    axRT.imshow(pbn_reference_with_grid)
-                    axRT.set_title("Clustered image (reference)", fontsize=9, pad=4)
+                    # Top-right: completed painting before this page's color is applied
+                    axRT.imshow(painting_so_far_with_grid(prev_mask))
+                    axRT.set_title("Painting so far", fontsize=9, pad=4)
                     axRT.axis("off")
 
                     # Bottom-right: what you already had (color key)
