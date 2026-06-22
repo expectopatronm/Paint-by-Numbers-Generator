@@ -593,21 +593,23 @@ def main(config: dict | None = None):
                             composite_u8 = frame_rgb
 
                         frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
+                        after_mask = np.logical_or(prev_mask, curr_mask)
 
                         # Layout
                         fig = new_fig((11.69, 8.27))
                         gs = GridSpec(
-                            2, 2,
-                            width_ratios=[3, 1],
+                            2, 3,
+                            width_ratios=[2.7, 1.0, 1.15],
                             height_ratios=[1, 1],
                             figure=fig,
-                            wspace=0.02,
+                            wspace=0.025,
                             hspace=0.04
                         )
 
                         axL = fig.add_subplot(gs[:, 0])
-                        axRT = fig.add_subplot(gs[0, 1])
-                        axRB = fig.add_subplot(gs[1, 1])
+                        axBefore = fig.add_subplot(gs[0, 1])
+                        axAfter = fig.add_subplot(gs[1, 1])
+                        axKey = fig.add_subplot(gs[:, 2])
 
                         # Left: current per-color frame
                         axL.imshow(frame_with_grid)
@@ -620,14 +622,18 @@ def main(config: dict | None = None):
                         )
                         axL.axis("off")
 
-                        # Top-right: completed painting before this page's color is applied
-                        axRT.imshow(painting_so_far_with_grid(prev_mask))
-                        axRT.set_title("Painting so far", fontsize=9, pad=4)
-                        axRT.axis("off")
+                        # Middle column: painting state before and after this page's color.
+                        axBefore.imshow(painting_so_far_with_grid(prev_mask))
+                        axBefore.set_title("Painting so far", fontsize=9, pad=4)
+                        axBefore.axis("off")
+
+                        axAfter.imshow(painting_so_far_with_grid(after_mask))
+                        axAfter.set_title("After this color", fontsize=9, pad=4)
+                        axAfter.axis("off")
 
                         # Bottom-right: existing color key panel
                         draw_color_key(
-                            axRB, centroids, all_recipes, all_entries, BASE_PALETTE,
+                            axKey, centroids, all_recipes, all_entries, BASE_PALETTE,
                             used_indices=[i],
                             title=f"Color Key • Color #{i + 1} ({role})",
                             tweaks=tweaks,
@@ -637,8 +643,8 @@ def main(config: dict | None = None):
                             left_pad=1.25, right_margin=0.18, text_gap=0.05,
                             approx_palette=approx_uint8
                         )
-                        axRB.text(0.05, 0.05, f"Color #{i + 1}", fontsize=8, transform=axRB.transAxes)
-                        axRB.axis("off")
+                        axKey.text(0.05, 0.05, f"Color #{i + 1}", fontsize=8, transform=axKey.transAxes)
+                        axKey.axis("off")
 
                         pdf.savefig(fig, dpi=300)
                         plt.close(fig)
@@ -694,20 +700,22 @@ def main(config: dict | None = None):
                         composite_u8 = frame_rgb
 
                     frame_with_grid = add_grid_to_rgb(composite_u8, grid_step=args.grid_step, grid_color=200)
+                    after_mask = np.logical_or(prev_mask, curr_mask)
 
                     fig = new_fig((11.69, 8.27))
                     gs = GridSpec(
-                        2, 2,
-                        width_ratios=[3, 1],
+                        2, 3,
+                        width_ratios=[2.7, 1.0, 1.15],
                         height_ratios=[1, 1],
                         figure=fig,
-                        wspace=0.02,
+                        wspace=0.025,
                         hspace=0.04
                     )
 
                     axL = fig.add_subplot(gs[:, 0])  # left spans both rows
-                    axRT = fig.add_subplot(gs[0, 1])  # top-right: painting completed before this page
-                    axRB = fig.add_subplot(gs[1, 1])  # bottom-right: existing panel (color key)
+                    axBefore = fig.add_subplot(gs[0, 1])
+                    axAfter = fig.add_subplot(gs[1, 1])
+                    axKey = fig.add_subplot(gs[:, 2])
 
                     # Left: current per-color frame
                     axL.imshow(frame_with_grid)
@@ -716,14 +724,18 @@ def main(config: dict | None = None):
                                    f"{'(outline multiply underlay)' if sketch_factor_rgb is not None else ''}"), pad=2)
                     axL.axis("off")
 
-                    # Top-right: completed painting before this page's color is applied
-                    axRT.imshow(painting_so_far_with_grid(prev_mask))
-                    axRT.set_title("Painting so far", fontsize=9, pad=4)
-                    axRT.axis("off")
+                    # Middle column: painting state before and after this page's color.
+                    axBefore.imshow(painting_so_far_with_grid(prev_mask))
+                    axBefore.set_title("Painting so far", fontsize=9, pad=4)
+                    axBefore.axis("off")
+
+                    axAfter.imshow(painting_so_far_with_grid(after_mask))
+                    axAfter.set_title("After this color", fontsize=9, pad=4)
+                    axAfter.axis("off")
 
                     # Bottom-right: what you already had (color key)
                     draw_color_key(
-                        axRB, centroids, all_recipes, all_entries, BASE_PALETTE,
+                        axKey, centroids, all_recipes, all_entries, BASE_PALETTE,
                         used_indices=[i],
                         title=f"Color Key • Color #{i + 1}",
                         tweaks=tweaks,
@@ -733,8 +745,8 @@ def main(config: dict | None = None):
                         left_pad=1.25, right_margin=0.18, text_gap=0.05,
                         approx_palette=approx_uint8
                     )
-                    axRB.text(0.05, 0.05, f"Color #{i + 1}", fontsize=8, transform=axRB.transAxes)
-                    axRB.axis("off")
+                    axKey.text(0.05, 0.05, f"Color #{i + 1}", fontsize=8, transform=axKey.transAxes)
+                    axKey.axis("off")
 
                     pdf.savefig(fig, dpi=300)
                     plt.close(fig)
