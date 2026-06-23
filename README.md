@@ -1,47 +1,83 @@
 # Paint-by-Numbers Generator
 
-This project turns a source image into a printable, painter-friendly guide: a sketch, a gridded transfer sheet, a color-mixed paint map, staged painting pages, one-page-per-color instructions, and optional centerline SVGs for plotting.
+This repository turns a source image into a printable, painter-friendly paint-by-numbers workbook. It does not stop at posterizing an image. It builds a full guide: clustered color map, real-paint recipes, transfer sketch, staged painting pages, per-color pages, before/after progress previews, recipe diagnostics, and optional centerline SVGs for plotting.
 
-The goal is not just to make a coloring-book poster. The goal is to create a workbook that helps someone actually paint the image: what to mix, where to put it, what has already been painted, and what the canvas should look like after each color.
+The first thing the generator gives you is the thing you actually care about: the finished workbook view, with the simplified painting and the paint recipes beside it.
 
 <p align="center">
-  <img src="docs/readme/00-source-photo.jpg" width="38%" alt="Source portrait" />
-  <img src="docs/readme/00-source-sketch.png" width="38%" alt="External sketch used by the guide" />
+  <img src="docs/readme/01-overview.png" width="94%" alt="Overview page with original, clustered image, and full color key" />
 </p>
 
-The current default run uses `pics/33.jpg` as the source image and `pics/33_sketch.png` as the supplied line sketch. The generated guide in this repository is:
+The current sample guide is included here:
 
 [paint_by_numbers_guide_1.pdf](paint_by_numbers_guide_1.pdf)
 
 ---
 
-## What It Produces
+## What This Is
 
-The generator creates an A4 landscape PDF. Each page has a job.
+The project answers a practical painting question:
 
-### 1. The Overview
+> Given an image, how do I turn it into a sequence of paintable decisions?
 
-The first page gives the complete picture: the original image, the simplified paint-by-numbers result, and the full color key.
+The PDF is designed to help a painter know:
+
+1. What the final simplified painting should look like.
+2. Which physical pigments to mix for each color.
+3. Where each color goes.
+4. What has already been painted.
+5. What the canvas should look like after the current color.
+6. How to transfer the drawing and grid.
+
+That is why the output is a workbook rather than a single image.
+
+---
+
+## The Current Output
+
+The generator creates an A4 landscape PDF. A current run has this broad structure:
+
+- Page 1: overview, source, clustered painting, and full color key.
+- Page 2: transfer sketch with grid.
+- Pages 3-8: broad painting stages.
+- Pages 9-28: one page per color.
+- Final page: completed paint map.
+- Extra files: centerline SVGs for plotting/editing.
+
+### Overview And Color Key
+
+The overview page is the main reference page. It shows the source image, the simplified paint map, and every recipe.
 
 <p align="center">
-  <img src="docs/readme/01-overview.png" width="92%" alt="Overview page with original, clustered painting, and full color key" />
+  <img src="docs/readme/01-overview.png" width="92%" alt="Overview page" />
 </p>
 
-This is the page you keep nearby when you want the whole painting in your head. It shows the final simplified color structure and every recipe the PDF will use.
+This is the page to keep nearby when you want the whole painting in your head.
 
-### 2. The Transfer Sketch
+### Source And Sketch
 
-Before painting, you need a drawing. The guide includes a gridded sketch page for transferring proportions onto canvas or paper.
+The current default source image and supplied sketch are:
 
 <p align="center">
-  <img src="docs/readme/02-transfer-sketch.png" width="70%" alt="Gridded external sketch transfer page" />
+  <img src="docs/readme/00-source-photo.jpg" width="38%" alt="Source portrait" />
+  <img src="docs/readme/00-source-sketch.png" width="38%" alt="External sketch" />
 </p>
 
-If `external_sketch` is set in `pbn/config.py`, that sketch is used directly. In the current default config, the supplied sketch is used everywhere the guide needs linework: the transfer page, the painting stages, per-color pages, and centerline SVG tracing.
+The sketch is not the main output; it is part of the process. It is used for transfer, for linework under the painting frames, and for centerline SVG tracing.
 
-### 3. Broad Painting Stages
+### Transfer Sketch
 
-The guide first gives broad stage pages. These are not one-color pages. They are painterly groups: deep shadows, core shadows, midtones, background/neutrals, half-lights, and highlights.
+The transfer sketch page gives you a gridded drawing that can be copied onto canvas or paper.
+
+<p align="center">
+  <img src="docs/readme/02-transfer-sketch.png" width="70%" alt="Transfer sketch with grid" />
+</p>
+
+If `external_sketch` is set in [pbn/config.py](pbn/config.py), the generator uses that exact sketch instead of generating linework from image edges.
+
+### Broad Painting Stages
+
+Before the one-color pages, the guide gives broader painting stages. These are useful because painters often work by value and structure before chasing every small color region.
 
 <p align="center">
   <img src="docs/readme/03-deep-shadows-stage.png" width="31%" alt="Deep shadows stage" />
@@ -49,55 +85,58 @@ The guide first gives broad stage pages. These are not one-color pages. They are
   <img src="docs/readme/05-highlights-stage.png" width="31%" alt="Highlights stage" />
 </p>
 
-These stage pages answer the high-level question: "What kind of painting move am I making right now?"
+The default stage mode is:
 
-The current default `frame_mode` is `combined`, which blends value-based painting order with practical color grouping. It does not blindly list colors by number. It tries to produce a sane painting sequence: establish dark structure, move through midtones and background, then finish with lights.
+```python
+frame_mode = "combined"
+```
 
-### 4. Per-Color Pages With Before And After
+That means the generator combines value-based staging with practical color grouping. The intent is a reasonable painting order: establish dark structure, build midtones and background, then add lighter regions.
 
-After the broad stages, the PDF becomes very specific: one page for each color.
+### Per-Color Pages
 
-The current per-color layout has three columns:
-
-- Left: the large working frame for this color.
-- Middle top: `Painting so far`.
-- Middle bottom: `After this color`.
-- Right: the recipe and pigment swatches for the current color.
+Each per-color page is a working instruction sheet for one color.
 
 <p align="center">
-  <img src="docs/readme/06-per-color-early.png" width="92%" alt="Per-color page showing working frame, painting so far, after this color, and color key" />
+  <img src="docs/readme/06-per-color-early.png" width="92%" alt="Per-color page" />
 </p>
 
-The useful part is the middle column. You can see the state before painting the current color, then immediately see what the canvas should look like after adding it.
+The current code layout is:
+
+- Column 1: large working frame for the current color.
+- Column 2 top: `Painting so far`.
+- Column 2 bottom: `After this color`.
+- Column 3 top: completed painting reference.
+- Column 3 bottom: recipe, mixed swatch, and pigment components.
+
+The middle column exists because it is easy to lose orientation on a long paint-by-number sequence. You can see the canvas before this color and after this color without mentally reconstructing the whole process.
 
 <p align="center">
   <img src="docs/readme/11-painting-so-far.png" width="28%" alt="Painting so far preview" />
   <img src="docs/readme/12-after-this-color.png" width="28%" alt="After this color preview" />
-  <img src="docs/readme/13-single-color-key.png" width="28%" alt="Single color key crop" />
+  <img src="docs/readme/13-single-color-key.png" width="28%" alt="Single color recipe key" />
 </p>
 
-The sketch stays visible in these previews, using the same configured sketch strength as the main working frame. That makes the previews feel like the actual canvas: partial paint plus the drawing still visible underneath.
-
-Here is the same idea later in the sequence:
+Later pages show the same idea after more colors have accumulated:
 
 <p align="center">
   <img src="docs/readme/07-per-color-midway.png" width="45%" alt="Midway per-color page" />
   <img src="docs/readme/08-per-color-late.png" width="45%" alt="Late per-color page" />
 </p>
 
-### 5. The Completed Map
+### Completed Map
 
 The final PDF page shows the completed simplified painting with the grid.
 
 <p align="center">
-  <img src="docs/readme/09-completed-map.png" width="72%" alt="Completed paint-by-numbers map" />
+  <img src="docs/readme/09-completed-map.png" width="72%" alt="Completed map" />
 </p>
 
 ---
 
-## The Pipeline
+## Pipeline
 
-The generator is a sequence of practical decisions. Each one exists because a printable paint guide has different needs from a normal image filter.
+The generator is a chain of image-processing, color-matching, and layout steps.
 
 ```mermaid
 flowchart LR
@@ -105,45 +144,41 @@ flowchart LR
     B --> C["Optional pre-brighten"]
     C --> D["CIELAB K-Means clustering"]
     D --> E["Potts/MRF smoothing"]
-    E --> F["Tiny-region cleanup"]
-    F --> G["Mixbox recipe search"]
-    G --> H["Stage and per-color ordering"]
-    H --> I["PDF guide"]
-    H --> J["Centerline SVG"]
-    K["External sketch"] --> I
-    K --> J
+    E --> F["Region cleanup"]
+    F --> G["Integer recipe search"]
+    G --> H{"Delta E > threshold?"}
+    H -- "no" --> I["Accept recipe"]
+    H -- "yes" --> J["Genetic integer fallback"]
+    J --> I
+    I --> K["Stage ordering"]
+    K --> L["PDF workbook"]
+    K --> M["Centerline SVG"]
+    N["External sketch"] --> L
+    N --> M
 ```
 
-### Image Preparation
+---
 
-The default config starts from `pics/33.jpg`. If the image is too small, the generator can run SUPIR before clustering. In the current sample run, the image was already large enough:
+## Color Clustering
 
-```text
-SUPIR upscale check: longest=3072px >= 3000px -> no upscale.
-```
-
-There is also an optional pre-brightening step. The current default keeps the original brightness:
-
-```text
-pre_brighten_pct = 0
-```
-
-### Color Simplification
-
-The image is clustered in CIELAB color space with K-Means. CIELAB is used because distances in Lab are closer to perceived color differences than raw RGB distances.
-
-The current default extracts:
+The image is clustered in perceptual CIELAB space with K-Means:
 
 ```python
 colors = 20
 resize = None
 ```
 
-That means the guide is built from 20 color clusters and, by default, clustering is run at full image resolution.
+`colors = 20` means the image is reduced to 20 paint colors. `resize = None` means clustering uses the full-resolution image rather than a smaller proxy.
 
-### Smoothing Without Losing The Painting
+CIELAB is used because it is closer to human color perception than raw RGB distances. This matters because a small numerical RGB difference can be perceptually large, and a large RGB difference can sometimes be perceptually modest.
 
-Raw clustering can produce isolated speckles. The generator can run Potts/MRF smoothing after labels are produced:
+After clustering, the label map is upsampled to full image size and can be smoothed.
+
+---
+
+## Region Smoothing
+
+Raw K-Means often creates speckles: tiny isolated islands of color. The generator can run a Potts/MRF-style smoothing pass:
 
 ```python
 mrf_smoothing = True
@@ -151,58 +186,254 @@ mrf_beta = 7.0
 mrf_iterations = 4
 ```
 
-This nudges neighboring pixels toward agreement while keeping the image tied to the original color clusters. It is not trying to blur the artwork. It is trying to make regions paintable.
+The smoothing step balances two goals:
 
-### Real Paint Recipes
+- Keep pixels close to their clustered color.
+- Encourage neighboring pixels to share labels.
 
-The color key is built from a real pigment palette, not arbitrary RGB names.
+This makes the result more paintable without simply blurring the image.
 
-Current default pigments:
+There is also optional region cleanup:
 
-- `alizarin_crimson`
-- `burnt_sienna`
-- `burnt_umber`
-- `cobalt_blue`
-- `indian_yellow`
-- `ivory_black`
-- `olive_green`
-- `paynes_gray`
-- `titanium_white`
-- `vandyke_brown`
-- `yellow_ochre`
+```python
+min_region_px = 0
+min_region_pct = 0.0
+```
 
-For each cluster, the generator searches integer paint recipes:
+Those can be increased when you want tiny connected components merged into neighboring regions.
+
+---
+
+## Paint Mixing Model
+
+The generator does not use arbitrary color names. It searches recipes from a real pigment palette:
+
+```python
+BASE_PALETTE = {
+    "alizarin_crimson": ...,
+    "burnt_sienna": ...,
+    "burnt_umber": ...,
+    "cobalt_blue": ...,
+    "indian_yellow": ...,
+    "ivory_black": ...,
+    "olive_green": ...,
+    "paynes_gray": ...,
+    "titanium_white": ...,
+    "vandyke_brown": ...,
+    "yellow_ochre": ...,
+}
+```
+
+Each candidate recipe is mixed with the Mixbox model. Mixbox is used because physical pigment mixing is nonlinear. Simple RGB averaging is not good enough for paint.
+
+The default first-pass search is still deterministic and exhaustive:
 
 ```python
 components = 5
 max_parts = 10
-delta_e_method = "colour_ciede2000"
 ```
 
-So a recipe can use up to 5 pigments and up to 10 total parts. Candidate mixes are evaluated with the learned Mixbox model, then scored against the target cluster color using Delta E. The PDF shows both the mixed swatch and the component pigment chips.
+That means the first pass tries integer recipes up to 10 total parts and up to 5 pigments.
 
-Example recipe text from the generated guide:
+Example recipe:
 
 ```text
-1 part alizarin_crimson + 1 part cobalt_blue + 1 part indian_yellow
-+ 1 part ivory_black + 4 parts paynes_gray
+1 part burnt_sienna + 2 parts cobalt_blue + 5 parts titanium_white + 1 part yellow_ochre
 ```
 
-This is why the output feels like a painting plan rather than just a posterized image.
+The result is scored with Delta E.
 
 ---
 
-## Page Types In The Current PDF
+## Delta E
 
-The current generated PDF has 29 pages:
+Delta E is the color difference between:
 
-- Page 1: overview and full color key.
-- Page 2: external sketch transfer page.
-- Pages 3-8: broad painting stages.
-- Pages 9-28: one page per color.
-- Page 29: completed map.
+- the target cluster color, and
+- the predicted mixed-paint color.
 
-Per-color pages follow the stepwise order implied by the broader frame sequence:
+The current default method is:
+
+```python
+delta_e_method = "colour_ciede2000"
+```
+
+Lower is better. In practical terms:
+
+- `Delta E <= 1.0`: excellent digital match.
+- `Delta E ~ 1-2`: visible but often acceptable.
+- `Delta E > 2`: worth investigating or retrying.
+
+Important caveat: Delta E here measures the software model. It does not guarantee your physical tube paints will match perfectly. The model predicts from RGB pigment constants and Mixbox. Real paint tubes can behave differently, especially in tints with strong pigments.
+
+---
+
+## Genetic Algorithm Fallback
+
+The newest recipe logic is:
+
+```text
+normal exhaustive integer search
+if Delta E <= 1.0:
+    accept recipe
+else:
+    run genetic integer optimizer
+```
+
+The genetic fallback exists because some colors cannot be matched well inside the smaller `10 parts / 5 pigments` first-pass search.
+
+The genetic fallback searches a larger integer recipe space:
+
+```python
+genetic_retry_enabled = True
+genetic_retry_delta_e = 1.0
+genetic_retry_max_parts = 20
+genetic_retry_components = 10
+genetic_retry_population = 180
+genetic_retry_generations = 160
+```
+
+It works directly on integer recipes. That is important. A continuous optimizer can find fractional paint weights like `0.613 titanium_white`, but those are not useful at the palette. The genetic optimizer searches recipes that are already printable as whole parts.
+
+A recipe is represented internally like an integer vector:
+
+```text
+[alizarin, sienna, umber, cobalt, indian_yellow, black, olive, paynes, white, vandyke, ochre]
+```
+
+The genetic optimizer uses:
+
+- a population of candidate recipes,
+- parent selection weighted by lower Delta E,
+- crossover between recipes,
+- mutation by moving/adding/removing paint parts,
+- elitism so the best candidates are not lost,
+- a final one-part local refinement.
+
+For a previously problematic gray target, the old recipe was:
+
+```text
+1 burnt_sienna + 2 cobalt_blue + 5 titanium_white + 1 yellow_ochre
+Delta E: about 2.00
+```
+
+The genetic fallback found recipes below `Delta E <= 1.0`, for example:
+
+```text
+1 burnt_sienna + 2 cobalt_blue + 1 indian_yellow + 1 paynes_gray + 7 titanium_white
+Delta E: about 0.54
+```
+
+This does not solve every real-world paint mismatch, but it makes the digital recipe search much stronger while keeping recipes as integer parts.
+
+---
+
+## Recipe Cache And Probe Scripts
+
+Full PDF generation can take a long time. Recipe experiments should not require rerunning clustering and PDF rendering.
+
+The generator now writes a recipe target cache:
+
+```python
+write_recipe_cache = True
+recipe_cache = "outputs/recipe_targets.json"
+```
+
+The cache stores:
+
+- color number,
+- target RGB,
+- chosen recipe,
+- predicted mixed RGB,
+- Delta E,
+- optimizer settings.
+
+After a full run, you can inspect a single color without regenerating the PDF:
+
+```powershell
+.\venv\Scripts\python.exe scripts\probe_color_recipe.py --color 20 --skip-integer
+```
+
+There is also an optimizer comparison script:
+
+```powershell
+.\venv\Scripts\python.exe scripts\experiment_integer_optimizers.py
+```
+
+That script compares:
+
+- the seed recipe,
+- the stochastic integer retry experiment,
+- simulated annealing,
+- genetic algorithm.
+
+The production generator currently uses only:
+
+```text
+integer baseline -> genetic fallback
+```
+
+The other methods remain useful for research and comparison.
+
+---
+
+## Progress Reporting
+
+Long runs now print coarse stage markers and progress bars.
+
+Example:
+
+```text
+[1/6] Loading image and preparing inputs...
+[2/6] Clustering image colors...
+[3/6] Smoothing and cleaning color regions...
+[4/6] Building paint recipes for 20 colors...
+Recipes:  35%|███████             | 7/20
+[5/6] Planning painting stages...
+[6/6] Rendering PDF pages...
+Stage pages: ...
+Per-color pages: ...
+```
+
+The recipe step is usually the long one, especially when genetic fallback is triggered for hard colors.
+
+---
+
+## PDF Page Logic
+
+### Overview Page
+
+The overview page includes:
+
+- original image,
+- simplified paint-by-numbers map,
+- complete color key,
+- mixed swatches,
+- component pigment chips,
+- Delta E values.
+
+### Stage Pages
+
+Stage pages group multiple colors by painting logic:
+
+- deep shadows,
+- core shadows,
+- midtones,
+- neutrals/background,
+- half-lights,
+- highlights.
+
+### Per-Color Pages
+
+Per-color pages are more precise. They show:
+
+- where this exact color goes,
+- what has already been painted,
+- what the painting should look like after this color,
+- a completed reference,
+- the recipe and swatches.
+
+Relevant config:
 
 ```python
 per_color_frames = True
@@ -212,18 +443,18 @@ prev_alpha = 0.10
 prev_highlight_mode = "neon_green"
 ```
 
-The large left frame can show previous areas with a subtle cumulative treatment. The middle previews show the cleaner canvas state before and after the current color.
-
 ---
 
 ## Centerline SVG Output
 
-The run also exports vector linework:
+The generator also writes:
 
 - [centerline_output.svg](centerline_output.svg)
 - [centerline_output_canvas.svg](centerline_output_canvas.svg)
 
-These are intended for plotting or further editing in tools such as Inkscape. The canvas SVG fits the traced sketch and grid into the configured physical canvas dimensions:
+These are useful if you want vector linework for plotting, editing, or transfer workflows.
+
+Current canvas settings:
 
 ```python
 canvas_dimensions_mm = (240, 300)
@@ -232,11 +463,11 @@ grid_step = "auto"
 grid_min_cols = 7
 ```
 
-The generator attempts to use `vpype` if available. If it is not installed, it still writes the raw canvas SVG.
+If `vpype` is available, the generator can use it. If not, it still writes the raw SVG.
 
 ---
 
-## How To Run It
+## Running The Generator
 
 From the repository root:
 
@@ -244,7 +475,7 @@ From the repository root:
 .\venv\Scripts\python.exe paint_by_numbers_generic_v8_pdf.py
 ```
 
-The compatibility entry point is intentionally small:
+The entry point is intentionally small:
 
 ```python
 from pbn.generator import main
@@ -253,15 +484,17 @@ if __name__ == "__main__":
     main()
 ```
 
-Most options live in [pbn/config.py](pbn/config.py). Edit `DEFAULT_CONFIG` there, then run the script again.
+Most behavior is controlled in:
 
-The default output filename is:
+[pbn/config.py](pbn/config.py)
+
+Default output:
 
 ```python
 pdf = "paint_by_numbers_guide.pdf"
 ```
 
-In this repository, the latest sample output was renamed to:
+The included sample PDF is:
 
 ```text
 paint_by_numbers_guide_1.pdf
@@ -269,17 +502,15 @@ paint_by_numbers_guide_1.pdf
 
 ---
 
-## Common Things To Change
+## Common Configuration Changes
 
 ### Use Another Image
-
-Set:
 
 ```python
 input = "pics/my_image.jpg"
 ```
 
-If you have your own sketch:
+### Use Your Own Sketch
 
 ```python
 external_sketch = "pics/my_sketch.png"
@@ -287,76 +518,88 @@ external_sketch = "pics/my_sketch.png"
 
 Use dark lines on a light background. The sketch will be resized to the source image size.
 
-### Change Detail Level
+### Change Number Of Colors
 
-Fewer colors are simpler to paint:
+Simpler:
 
 ```python
 colors = 12
 ```
 
-More colors preserve more detail:
+More detailed:
 
 ```python
 colors = 30
 ```
 
-There is a real tradeoff. More clusters can look better on screen but produce more mixing, more pages, and more tiny decisions at the easel.
+More colors can preserve detail, but they also produce more recipes, more pages, and more decisions.
 
-### Simplify Recipes
+### Change First-Pass Recipe Complexity
 
-For simpler paint mixing:
+Simpler first-pass recipes:
 
 ```python
 components = 3
 max_parts = 6
 ```
 
-For more accurate color matching:
+More expressive first-pass recipes:
 
 ```python
 components = 5
 max_parts = 10
 ```
 
-The current sample uses the more expressive setting.
+The genetic fallback is separate and only runs when Delta E is above the threshold.
+
+### Change Genetic Fallback Strength
+
+More aggressive:
+
+```python
+genetic_retry_population = 240
+genetic_retry_generations = 220
+```
+
+Faster:
+
+```python
+genetic_retry_population = 100
+genetic_retry_generations = 80
+```
 
 ### Adjust Sketch Strength
-
-The sketch is multiply-blended into colored frames:
 
 ```python
 sketch_alpha = 0.25
 ```
 
-Lower values make the sketch lighter. Higher values make it darker and more ink-like.
+Lower values make the sketch lighter. Higher values make it stronger.
 
 ### Split Foreground And Background
-
-The generator has optional RMBG-2.0 support:
 
 ```python
 separate_fg_bg = True
 ```
 
-When enabled, per-color pages can be split into background colors first, then foreground colors seeded with the completed background. The default sample keeps this off.
+When enabled, the generator can create background color pages first, then foreground color pages seeded with the completed background.
 
 ---
 
-## Why The Guide Is Structured This Way
+## Practical Caveat About Real Paint
 
-A normal paint-by-numbers sheet tells you where every number goes. That is useful, but it is not enough if you want to paint calmly.
+The recipes are model-based. They are better than RGB averaging, but they are still predictions.
 
-This generator tries to answer four questions on every page:
+Real paint can differ because:
 
-1. What color am I painting now?
-2. Where does that color go?
-3. What should the canvas already look like?
-4. What should it look like after this step?
+- your tube color may not match the stored palette constant,
+- blue pigments can tint strongly when mixed with white,
+- titanium white can reveal chroma in a mixture,
+- pigment brands vary,
+- wet paint and dry paint can differ,
+- lighting changes perception.
 
-The broad stage pages give orientation. The per-color pages give precision. The sketch keeps the drawing visible. The grid keeps proportions honest. The recipes keep the palette physically mixable.
-
-That is the core idea: turn a complicated image into a sequence of small, paintable decisions.
+The generator gives a strong starting point. For important colors, especially pale neutrals containing cobalt/blue, test a small swatch before committing a large area.
 
 ---
 
@@ -364,12 +607,16 @@ That is the core idea: turn a complicated image into a sequence of small, painta
 
 ```text
 pbn/
-  generator.py       Main generation pipeline and PDF assembly
+  generator.py       Main pipeline and PDF assembly
   config.py          Default configuration
-  image_ops.py       Sketching, grids, cleanup, smoothing helpers
-  mixing.py          Recipe search and Mixbox-based mixing
+  mixing.py          Mixbox, integer search, genetic fallback
+  image_ops.py       Sketch, grid, cleanup, smoothing helpers
   pdf_render.py      Color key and PDF layout helpers
   svg_trace.py       Centerline SVG tracing
+
+scripts/
+  probe_color_recipe.py              Probe one color from cache or target RGB
+  experiment_integer_optimizers.py   Compare optimizer strategies
 
 pics/
   33.jpg             Current sample source image
@@ -378,26 +625,28 @@ pics/
 docs/readme/
   *.png              README images rendered from the generated PDF
 
+outputs/
+  recipe_targets.json                Recipe target cache after generation
+
 paint_by_numbers_guide_1.pdf
-  Current sample guide
+  Included sample guide
 ```
 
 ---
 
 ## Current Sample Run
 
-The sample PDF in this repository was generated with the current default config. The run took about 25 minutes on this machine and ended with:
+A representative run prints:
 
 ```text
+SUPIR upscale check: longest=3072px >= 3000px -> no upscale.
+Pre-brighten skipped (pre_brighten_pct=0).
+Applying Potts/MRF label smoothing (beta=7.0, iterations=4).
+Recipe target cache saved: outputs/recipe_targets.json
 Saved A4 landscape PDF to paint_by_numbers_guide.pdf
 Centerline SVG with grid saved: centerline_output.svg
 Centerline canvas SVG saved: centerline_output_canvas.svg
-Total time: 1497.90s
 ```
 
-The generated sample was then renamed to:
-
-```text
-paint_by_numbers_guide_1.pdf
-```
+On this machine, full generation has typically taken tens of minutes, depending on recipe-search settings and how many colors trigger the genetic fallback.
 
