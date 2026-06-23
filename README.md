@@ -433,11 +433,18 @@ Per-color pages are more precise. They show:
 - a completed reference,
 - the recipe and swatches.
 
+By default, per-color pages use an adjacent painting order. The generator
+builds a neighbor graph from the final color-label map, then grows the sequence
+from already-painted regions. It first prefers a color touching the previous
+page's color; when that path is exhausted, it chooses a color touching any
+painted area. This keeps the workbook closer to a continuous painting workflow
+instead of jumping between value groups or isolated in-between regions.
+
 Relevant config:
 
 ```python
 per_color_frames = True
-per_color_order_mode = "stepwise"
+per_color_order_mode = "adjacent"
 per_color_cumulative = True
 prev_alpha = 0.10
 prev_highlight_mode = "neon_green"

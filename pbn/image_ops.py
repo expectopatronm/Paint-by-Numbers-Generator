@@ -92,54 +92,39 @@ def group_value5_exclusive(palette: np.ndarray) -> Dict[str, List[int]]:
     return {"deep": deep, "core": core, "mids": mids, "half": half, "highs": highs}
 
 
-def adjacent_rings_by_value(labels_full: np.ndarray,
-                            approx_palette: np.ndarray) -> List[List[int]]:
-    """
-    Group colors into adjacency-based 'rings' from outer → inner, and
-    sort each ring dark → light.
+def _label_adjacency(labels_full: np.ndarray, color_count: int) -> Tuple[List[set[int]], np.ndarray]:
+    """Build a 4-neighborhood label graph and shared-edge counts."""
+    adj: List[set[int]] = [set() for _ in range(color_count)]
+    shared_edges = np.zeros((color_count, color_count), dtype=np.int64)
 
-    - Adjacency priority: rings are BFS layers from the image border in the
-      label adjacency graph.
-    - Dark→light: within each ring we sort by relative luminance ascending.
-    """
-    H, W = labels_full.shape
-    C = approx_palette.shape[0]
-
-    # --- Build adjacency graph between labels (4-neighborhood) ---
-    adj: List[set[int]] = [set() for _ in range(C)]
-
-    # vertical neighbors
-    for y in range(H - 1):
-        row = labels_full[y]
-        next_row = labels_full[y + 1]
-        diff = (row != next_row)
-        if not diff.any():
+    vertical = labels_full[:-1, :] != labels_full[1:, :]
+    ys, xs = np.where(vertical)
+    for y, x in zip(ys, xs):
+        a = int(labels_full[y, x])
+        b = int(labels_full[y + 1, x])
+        if a == b:
             continue
-        xs = np.where(diff)[0]
-        for x in xs:
-            a = int(row[x])
-            b = int(next_row[x])
-            if a == b:
-                continue
-            adj[a].add(b)
-            adj[b].add(a)
+        adj[a].add(b)
+        adj[b].add(a)
+        shared_edges[a, b] += 1
+        shared_edges[b, a] += 1
 
-    # horizontal neighbors
-    for y in range(H):
-        row = labels_full[y]
-        diff = (row[:-1] != row[1:])
-        if not diff.any():
+    horizontal = labels_full[:, :-1] != labels_full[:, 1:]
+    ys, xs = np.where(horizontal)
+    for y, x in zip(ys, xs):
+        a = int(labels_full[y, x])
+        b = int(labels_full[y, x + 1])
+        if a == b:
             continue
-        xs = np.where(diff)[0]
-        for x in xs:
-            a = int(row[x])
-            b = int(row[x + 1])
-            if a == b:
-                continue
-            adj[a].add(b)
-            adj[b].add(a)
+        adj[a].add(b)
+        adj[b].add(a)
+        shared_edges[a, b] += 1
+        shared_edges[b, a] += 1
 
-    # --- Seeds: labels that touch the border are 'outer' (distance 0) ---
+    return adj, shared_edges
+
+
+def _border_distances(labels_full: np.ndarray, adj: List[set[int]], color_count: int) -> List[int]:
     border_labels = (
         set(labels_full[0, :]) |
         set(labels_full[-1, :]) |
@@ -147,14 +132,13 @@ def adjacent_rings_by_value(labels_full: np.ndarray,
         set(labels_full[:, -1])
     )
 
-    dist: List[int | None] = [None] * C
+    dist: List[int | None] = [None] * color_count
     q = deque()
     for lab in border_labels:
         i = int(lab)
         dist[i] = 0
         q.append(i)
 
-    # BFS over adjacency graph
     while q:
         i = q.popleft()
         for j in adj[i]:
@@ -162,29 +146,80 @@ def adjacent_rings_by_value(labels_full: np.ndarray,
                 dist[j] = dist[i] + 1
                 q.append(j)
 
-    # Unreached labels (e.g. unused clusters) → shove them into a final inner ring
     if any(d is None for d in dist):
         maxd = max(d for d in dist if d is not None) if any(d is not None for d in dist) else 0
-        for i in range(C):
+        for i in range(color_count):
             if dist[i] is None:
                 dist[i] = maxd + 1
 
-    # --- Build rings by distance ---
-    rings: Dict[int, List[int]] = {}
-    for i, d in enumerate(dist):
-        rings.setdefault(int(d), []).append(i)
+    return [int(d) for d in dist]
 
-    # --- Sort rings by distance (outer→inner) and each ring dark→light ---
-    ordered_rings: List[List[int]] = []
-    for d in sorted(rings.keys()):
-        idxs = rings[d]
 
-        # adjacency priority: we keep rings split by d
-        # dark→light inside the ring
-        idxs.sort(key=lambda i: relative_luminance(approx_palette[i]))
-        ordered_rings.append(idxs)
+def adjacent_color_order(labels_full: np.ndarray,
+                         approx_palette: np.ndarray,
+                         area: np.ndarray | None = None) -> List[int]:
+    """
+    Order colors so each new color preferably touches the painted set.
 
-    return ordered_rings
+    This grows a path over the label adjacency graph. It starts near the
+    outside, then first tries to choose an unpainted neighbor of the previous
+    color. If that is exhausted, it chooses from the broader painted frontier.
+    Disconnected components restart from their own outermost/largest color.
+    """
+    C = approx_palette.shape[0]
+    if area is None:
+        area = np.array([(labels_full == i).sum() for i in range(C)], dtype=np.int64)
+
+    adj, shared_edges = _label_adjacency(labels_full, C)
+    border_dist = _border_distances(labels_full, adj, C)
+    luminance = np.array([relative_luminance(approx_palette[i]) for i in range(C)], dtype=float)
+
+    remaining = set(range(C))
+    painted: set[int] = set()
+    order: List[int] = []
+    last: int | None = None
+
+    def start_key(i: int):
+        return (border_dist[i], -int(area[i]), luminance[i], i)
+
+    def local_key(i: int, anchor: int):
+        return (
+            -int(shared_edges[i, anchor]),
+            border_dist[i],
+            -int(area[i]),
+            luminance[i],
+            i,
+        )
+
+    while remaining:
+        local_frontier = [i for i in remaining if last is not None and i in adj[last]]
+        if local_frontier and last is not None:
+            nxt = min(local_frontier, key=lambda i: local_key(i, last))
+        else:
+            frontier = [i for i in remaining if any(j in painted for j in adj[i])]
+            if frontier:
+                def frontier_key(i: int):
+                    shared = int(sum(shared_edges[i, j] for j in painted))
+                    nearest_painted_ring = min(border_dist[j] for j in adj[i] if j in painted)
+                    return (
+                        nearest_painted_ring,
+                        border_dist[i],
+                        -shared,
+                        -int(area[i]),
+                        luminance[i],
+                        i,
+                    )
+
+                nxt = min(frontier, key=frontier_key)
+            else:
+                nxt = min(remaining, key=start_key)
+
+        remaining.remove(nxt)
+        painted.add(nxt)
+        order.append(nxt)
+        last = nxt
+
+    return order
 
 
 def build_value_tweaks(palette: np.ndarray, recipes_text: List[str], *, threshold=0.25) -> Dict[int, str]:
