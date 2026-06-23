@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+import json
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from types import SimpleNamespace
 from typing import List
 
@@ -13,6 +14,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec
 from PIL import Image, ImageEnhance, ImageOps
 from sklearn.cluster import KMeans
+from tqdm.auto import tqdm
 
 from . import color as color_space
 from . import mixing
@@ -37,7 +39,7 @@ from .image_ops import (
 )
 from .imprimatura import _prev_highlight_rgb, choose_imprimatura_target_from_image
 from .integrations import _maybe_upscale_input, rmbg_alpha_matte
-from .mixing import _init_worker, _recipe_worker, integer_mix_best, recipe_text
+from .mixing import _init_worker, _recipe_worker, genetic_integer_mix_best, integer_mix_best, recipe_text
 from .pdf_render import draw_color_key, new_fig
 from .svg_trace import _auto_grid_step, run_centerline_trace
 
@@ -76,6 +78,7 @@ def main(config: dict | None = None):
     # -------------------------
     # Load twice: one for OUTLINE (no pre-brighten), one for COLORING (pre-brighten)
     # -------------------------
+    print("[1/6] Loading image and preparing inputs...")
     img_outline = Image.open(args.input)  # upscaled (if enabled), NOT pre-brightened
     img_outline = ImageOps.exif_transpose(img_outline).convert("RGB")
     img = img_outline.copy()  # this copy will be pre-brightened for clustering/coloring
@@ -133,6 +136,7 @@ def main(config: dict | None = None):
             labs.append(lab)
         return np.array(labs, dtype=np.float32)
 
+    print("[2/6] Clustering image colors...")
     feats = rgbrow_to_labrows(pixels_small.astype(np.uint8))
     kmeans = KMeans(n_clusters=args.colors, random_state=42, n_init=8)
     kmeans.fit(feats)
@@ -146,6 +150,7 @@ def main(config: dict | None = None):
     labels_full = Image.fromarray(labels_small, mode="L").resize((orig_w, orig_h), resample=Image.NEAREST)
     labels_full = np.array(labels_full, dtype=np.uint8)
 
+    print("[3/6] Smoothing and cleaning color regions...")
     if bool(getattr(args, "mrf_smoothing", True)):
         print(
             "Applying Potts/MRF label smoothing "
@@ -172,12 +177,13 @@ def main(config: dict | None = None):
 
     centroids_list = [c.astype(float).tolist() for c in centroids]
 
+    print(f"[4/6] Building paint recipes for {len(centroids_list)} colors...")
     if args.parallel and len(centroids_list) > 1:
         max_workers = int(args.workers) if args.workers else (os.cpu_count() or 1)
         # Guard against silly over-commit (optional, but polite)
         max_workers = max(1, min(max_workers, len(centroids_list)))
 
-        tasks = []
+        tasks = {}
         with ProcessPoolExecutor(
                 max_workers=max_workers,
                 initializer=_init_worker,
@@ -187,7 +193,7 @@ def main(config: dict | None = None):
                     str(args.delta_e_method),
                 ),
         ) as ex:
-            for c in centroids_list:
+            for idx, c in enumerate(centroids_list):
                 fut = ex.submit(
                     _recipe_worker,
                     c,
@@ -202,12 +208,24 @@ def main(config: dict | None = None):
                                                                                                               "prefer_simple_lambda_parts",
                                                                                                               0.01) if hasattr(
                         args, "prefer_simple_lambda_parts") else 0.01),
+                    bool(getattr(args, "genetic_retry_enabled", True)),
+                    float(getattr(args, "genetic_retry_delta_e", 1.0)),
+                    int(getattr(args, "genetic_retry_max_parts", 20)),
+                    int(getattr(args, "genetic_retry_components", 10)),
+                    int(getattr(args, "genetic_retry_population", 180)),
+                    int(getattr(args, "genetic_retry_generations", 160)),
                 )
 
-                tasks.append(fut)
+                tasks[fut] = idx
 
-            # preserve original centroid order as results return
-            results = [t.result() for t in tasks]
+            results = [None] * len(centroids_list)
+            for fut in tqdm(
+                as_completed(tasks),
+                total=len(tasks),
+                desc="Recipes",
+                unit="color",
+            ):
+                results[tasks[fut]] = fut.result()
 
         for res in results:
             entries = res["entries"]
@@ -219,13 +237,25 @@ def main(config: dict | None = None):
             deltaEs.append(err)
     else:
         # Fallback: single-core
-        for col in centroids.astype(np.float32):
+        for col in tqdm(centroids.astype(np.float32), total=len(centroids), desc="Recipes", unit="color"):
             entries, approx_rgb, err = integer_mix_best(
                 col,
                 names,
                 max_parts=args.max_parts,
                 max_components=args.components,
             )
+            if bool(getattr(args, "genetic_retry_enabled", True)) and err > float(getattr(args, "genetic_retry_delta_e", 1.0)):
+                genetic_entries, genetic_rgb, genetic_err = genetic_integer_mix_best(
+                    col,
+                    names,
+                    max_parts=int(getattr(args, "genetic_retry_max_parts", 20)),
+                    max_components=int(getattr(args, "genetic_retry_components", 10)),
+                    population=int(getattr(args, "genetic_retry_population", 180)),
+                    generations=int(getattr(args, "genetic_retry_generations", 160)),
+                    seed_entries=entries,
+                )
+                if genetic_err < err:
+                    entries, approx_rgb, err = genetic_entries, genetic_rgb, genetic_err
             all_entries.append(entries)
             all_recipes.append(recipe_text(entries))
             approx_rgbs.append(np.array(approx_rgb, dtype=float))
@@ -233,7 +263,43 @@ def main(config: dict | None = None):
 
     approx_uint8 = np.clip(np.rint(np.array(approx_rgbs)), 0, 255).astype(np.uint8)
 
+    if bool(getattr(args, "write_recipe_cache", True)):
+        cache_path = str(getattr(args, "recipe_cache", "outputs/recipe_targets.json"))
+        try:
+            os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+            cache_payload = {
+                "input": str(args.input),
+                "colors": int(args.colors),
+                "palette": list(args.palette),
+                "max_parts": int(args.max_parts),
+                "components": int(args.components),
+                "delta_e_method": str(args.delta_e_method),
+                "genetic_retry_enabled": bool(getattr(args, "genetic_retry_enabled", True)),
+                "genetic_retry_delta_e": float(getattr(args, "genetic_retry_delta_e", 1.0)),
+                "genetic_retry_max_parts": int(getattr(args, "genetic_retry_max_parts", 20)),
+                "genetic_retry_components": int(getattr(args, "genetic_retry_components", 10)),
+                "genetic_retry_population": int(getattr(args, "genetic_retry_population", 180)),
+                "genetic_retry_generations": int(getattr(args, "genetic_retry_generations", 160)),
+                "color_targets": [
+                    {
+                        "color_number": int(i + 1),
+                        "target_rgb": [int(x) for x in np.rint(centroids[i]).astype(int).tolist()],
+                        "recipe_entries": [{"pigment": str(n), "parts": int(p)} for n, p in all_entries[i]],
+                        "recipe_text": str(all_recipes[i]),
+                        "predicted_rgb": [int(x) for x in np.rint(approx_uint8[i]).astype(int).tolist()],
+                        "delta_e": float(deltaEs[i]),
+                    }
+                    for i in range(args.colors)
+                ],
+            }
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(cache_payload, f, indent=2)
+            print(f"Recipe target cache saved: {cache_path}")
+        except Exception as e:
+            print(f"Recipe target cache skipped ({e}).")
+
     # PBN image from MIXED palette using the final smoothed/cleaned labels.
+    print("[5/6] Planning painting stages...")
     pbn_image = approx_uint8[labels_full]
 
     # Groupings (exclusive)
@@ -332,6 +398,7 @@ def main(config: dict | None = None):
     # -------------------------
     # PDF assembly
     # -------------------------
+    print("[6/6] Rendering PDF pages...")
     A4_LANDSCAPE = (11.69, 8.27)
     with (PdfPages(args.pdf) as pdf):
         # Page 1
@@ -442,7 +509,7 @@ def main(config: dict | None = None):
                     plt.close(fig)
 
         # Step pages
-        for title, idxs, frame in frames_to_emit:
+        for title, idxs, frame in tqdm(frames_to_emit, desc="Stage pages", unit="page"):
             if sketch_factor_rgb is not None:
                 frame_f = np.clip(frame.astype(np.float32) / 255.0, 0.0, 1.0)
                 composite = np.clip(frame_f * sketch_factor_rgb, 0.0, 1.0)
@@ -555,7 +622,7 @@ def main(config: dict | None = None):
                     prev_mask = (seed_prev_mask.copy()
                                  if seed_prev_mask is not None
                                  else np.zeros((H, W), dtype=bool))
-                    for i in order:
+                    for i in tqdm(order, desc=f"Per-color pages ({which_mask_name})", unit="page"):
                         # pixels for this color restricted to which_mask
                         curr_mask = np.logical_and(labels_full == i, which_mask)
 
@@ -668,7 +735,7 @@ def main(config: dict | None = None):
             else:
                 # --- Original behavior (no split) ---
                 prev_mask = np.zeros((H, W), dtype=bool)
-                for i in per_color_order:
+                for i in tqdm(per_color_order, desc="Per-color pages", unit="page"):
                     curr_mask = (labels_full == i)
                     frame_rgb = np.full_like(pbn_image, 255, dtype=np.uint8)
 

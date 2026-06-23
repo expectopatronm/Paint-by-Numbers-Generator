@@ -83,6 +83,12 @@ DEFAULT_CONFIG = {
     "input": "pics/33.jpg",
     "pdf": "paint_by_numbers_guide.pdf",
     "external_sketch": "pics/33_sketch.png",
+    # recipe_cache:
+    #   - JSON cache of cluster target colors and recipe results.
+    #   - Written after recipe generation so optimizer experiments can
+    #     target a color number without rerunning K-Means or rendering a PDF.
+    "write_recipe_cache": True,
+    "recipe_cache": "outputs/recipe_targets.json",
     # ------------------------------------------------------------------
     # 3) CANVAS GEOMETRY & PRINT LAYOUT (FOR CENTERLINE SVG CANVAS)
     # ------------------------------------------------------------------
@@ -160,6 +166,27 @@ DEFAULT_CONFIG = {
     "palette": list(BASE_PALETTE.keys()),
     "components": 5,
     "max_parts": 10,
+    # genetic_retry_enabled:
+    #   - If True, run a genetic integer optimizer when the normal exhaustive
+    #     integer search returns a recipe above genetic_retry_delta_e.
+    #   - This keeps the old deterministic search as the first pass, then
+    #     uses a larger integer recipe space only for difficult colors.
+    # genetic_retry_delta_e:
+    #   - Trigger threshold. Recipes with Delta E above this value get the
+    #     genetic fallback search.
+    # genetic_retry_max_parts:
+    #   - Maximum total parts allowed in a genetic fallback recipe.
+    # genetic_retry_components:
+    #   - Maximum number of pigments allowed in a genetic fallback recipe.
+    # genetic_retry_population / genetic_retry_generations:
+    #   - Search budget for the genetic optimizer. Higher values can improve
+    #     hard colors but increase runtime.
+    "genetic_retry_enabled": True,
+    "genetic_retry_delta_e": 1.0,
+    "genetic_retry_max_parts": 20,
+    "genetic_retry_components": 10,
+    "genetic_retry_population": 180,
+    "genetic_retry_generations": 160,
     # delta_e_method:
     #   - "colour_ciede2000" uses the colour-science implementation of
     #     CIEDE2000 for recipe scoring (default).
