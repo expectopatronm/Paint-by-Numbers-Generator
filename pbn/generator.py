@@ -27,7 +27,7 @@ from .image_ops import (
     _apply_clean_stencil_rgb,
     _map_stencil_brightness_slider,
     add_grid_to_rgb,
-    adjacent_rings_by_value,
+    adjacent_color_order,
     build_value_tweaks,
     cleanup_label_regions,
     group_classic_exclusive,
@@ -580,18 +580,15 @@ def main(config: dict | None = None):
 
             # --- Decide per-color order mode ---
             order_mode = getattr(args, "per_color_order_mode")
+            if order_mode is None:
+                order_mode = "adjacent"
 
             # --- Build per_color_order according to mode ---
             per_color_order: List[int] = []
 
             if order_mode == "adjacent":
-                # Adjacency grouping only for per-color frames:
-                # outer → inner rings, within each ring dark → light, large areas first
-                rings = adjacent_rings_by_value(labels_full, approx_uint8)
-                for ring in rings:
-                    for idx in sorted(ring, key=lambda i: -int(area[i])):
-                        if idx not in per_color_order:
-                            per_color_order.append(idx)
+                # Grow from already-painted regions whenever possible.
+                per_color_order = adjacent_color_order(labels_full, approx_uint8, area)
             else:
                 # Old behavior: follow the stepwise frames order
                 for _title, idxs, _frame in frames_to_emit:
@@ -604,8 +601,7 @@ def main(config: dict | None = None):
                 if i not in per_color_order:
                     per_color_order.append(i)
 
-            # --- NEW: When FG/BG split is on, we split that order into two tracks,
-            # following the SAME Stepwise ordering.
+            # When FG/BG split is on, split the selected order into two tracks.
             if bool(getattr(args, "separate_fg_bg", False)) and (fg_mask is not None):
                 # Helper: does color i have any pixels in FG or BG?
                 def has_pixels(i, mask):

@@ -213,15 +213,13 @@ DEFAULT_CONFIG = {
     #           Follow the order implied by the chosen frame_mode
     #           (older behavior; respects the frame painting sequence).
     #       "adjacent":
-    #           Use adjacency rings from the border inward; within each
-    #           ring, sort dark→light and large areas first (more spatially
-    #           coherent progression).
-    #   - None (if used) would be interpreted as:
-    #         - "adjacent" if frame_mode == "adjacent"
-    #         - "stepwise" otherwise (kept for backward-compat).
+    #           Grow from already-painted regions. Each next color is chosen
+    #           from labels that physically touch the painted set whenever
+    #           possible, keeping per-color pages spatially continuous.
+    #   - None (if used) is treated like "adjacent".
     "frame_mode": "combined",  # {"classic", "value5", "both", "combined"}
     "per_color_frames": True,
-    "per_color_order_mode": "stepwise",
+    "per_color_order_mode": "adjacent",
     # ------------------------------------------------------------------
     # 8) COLOR-KEY RENDERING & TEXT LAYOUT
     # ------------------------------------------------------------------
