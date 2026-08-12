@@ -98,6 +98,27 @@ def rgb8_to_lab(rgb_u8: np.ndarray) -> np.ndarray:
     return xyz_to_lab(srgb8_to_xyz(rgb_u8))
 
 
+def rgb8_rows_to_lab(rgb_rows: np.ndarray) -> np.ndarray:
+    """Convert an array of sRGB rows in the 0..255 range to CIELAB."""
+    linear = srgb_to_linear_arr(np.asarray(rgb_rows, dtype=np.float64) / 255.0)
+    matrix = np.array([
+        [0.4124564, 0.3575761, 0.1804375],
+        [0.2126729, 0.7151520, 0.0721750],
+        [0.0193339, 0.1191920, 0.9503041],
+    ], dtype=np.float64)
+    xyz = linear @ matrix.T
+    scaled = xyz / np.array([0.95047, 1.0, 1.08883], dtype=np.float64)
+    threshold = (6.0 / 29.0) ** 3
+    f = np.where(
+        scaled > threshold,
+        np.cbrt(scaled),
+        (1.0 / 3.0) * (29.0 / 6.0) ** 2 * scaled + 4.0 / 29.0,
+    )
+    return np.column_stack((116.0 * f[:, 1] - 16.0,
+                            500.0 * (f[:, 0] - f[:, 1]),
+                            200.0 * (f[:, 1] - f[:, 2])))
+
+
 def lab_to_rgb8(lab: np.ndarray) -> np.ndarray:
     """Convert CIELAB to sRGB uint8."""
     return xyz_to_srgb8(lab_to_xyz(lab))
@@ -134,6 +155,28 @@ def deltaE_lab(rgb1_u8: Sequence[int], rgb2_u8: Sequence[int]) -> float:
         return float(_deltaE_ciede2000(lab1[np.newaxis, :], lab2[np.newaxis, :])[0])
     except Exception:
         return float(np.linalg.norm(lab1 - lab2))
+
+
+def deltaE_lab_rows(rgb_rows: np.ndarray, target_rgb: Sequence[int]) -> np.ndarray:
+    """Calculate Delta E from many sRGB colours to one target colour."""
+    labs = rgb8_rows_to_lab(rgb_rows)
+    target_lab = rgb8_to_lab(np.asarray(target_rgb, dtype=np.float32))
+    method = str(globals().get("DELTA_E_METHOD", "colour_ciede2000")).lower()
+
+    if method in ("cie76", "deltae76", "lab", "euclidean"):
+        return np.linalg.norm(labs - target_lab, axis=1)
+
+    if method in ("colour", "colour_ciede2000", "colour-science", "colour-science_ciede2000"):
+        if _colour_delta_E is not None:
+            try:
+                return np.asarray(_colour_delta_E(labs, target_lab, method="CIE 2000"), dtype=float)
+            except Exception:
+                pass
+
+    try:
+        return np.asarray(_deltaE_ciede2000(labs, target_lab[np.newaxis, :]), dtype=float)
+    except Exception:
+        return np.linalg.norm(labs - target_lab, axis=1)
 
 
 def rgb_to_hsv(rgb: Sequence[int]) -> Tuple[float, float, float]:

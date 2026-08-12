@@ -183,3 +183,6 @@ temp/
 
 # Local Real-ESRGAN binaries/models
 realesrgan-ncnn-vulkan*/
+
+# Archive files
+archival/

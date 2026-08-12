@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import itertools
+import math
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import List, Sequence, Tuple
 
@@ -14,6 +16,14 @@ BASE_PALETTE = None
 DARKEN_PER_PIGMENT = None
 
 _MIXBOX_LATENTS: dict[tuple[int, int, int], list[float]] = {}
+
+
+@dataclass(frozen=True)
+class IntegerRecipeCatalog:
+    """Precomputed colours and entries for every allowed integer recipe."""
+
+    entries: tuple[tuple[tuple[str, int], ...], ...]
+    rgbs: np.ndarray
 
 
 def darken_srgb(rgb, factor=0.8, gamma=2.2):
@@ -159,6 +169,72 @@ def integer_mix_best(
     return best_entries, best_rgb, best_err
 
 
+def build_integer_recipe_catalog(
+    base_names: Sequence[str],
+    *,
+    max_parts: int = 10,
+    max_components: int = 5,
+    max_part_per_pigment: int = 5,
+) -> IntegerRecipeCatalog:
+    """Build every unique, reduced recipe within the practical limits.
+
+    Args:
+        base_names: Pigments available to the recipe search.
+        max_parts: Maximum sum of all integer parts in one recipe.
+        max_components: Maximum number of distinct pigments in one recipe.
+        max_part_per_pigment: Maximum integer amount of any one pigment.
+
+    Returns:
+        A reusable catalogue sorted so equally accurate recipes prefer fewer
+        pigments and fewer total parts.
+    """
+    names = list(base_names)
+    max_parts = max(1, int(max_parts))
+    max_part_per_pigment = max(1, min(int(max_part_per_pigment), max_parts))
+    max_components = max(1, min(int(max_components), len(names), max_parts))
+    candidates: list[tuple[tuple[tuple[str, int], ...], np.ndarray]] = []
+
+    for component_count in range(1, max_components + 1):
+        for combo in itertools.combinations(names, component_count):
+            for parts in itertools.product(range(1, max_part_per_pigment + 1), repeat=component_count):
+                if sum(parts) > max_parts or math.gcd(*parts) != 1:
+                    continue
+                rgb = np.array(_cached_mix_color(tuple(combo), tuple(parts)), dtype=float)
+                entries = tuple((combo[i], int(parts[i])) for i in range(component_count))
+                candidates.append((entries, rgb))
+
+    candidates.sort(key=lambda item: (len(item[0]), sum(p for _name, p in item[0]),
+                                      max(p for _name, p in item[0]), item[0]))
+    return IntegerRecipeCatalog(
+        entries=tuple(entries for entries, _rgb in candidates),
+        rgbs=np.stack([rgb for _entries, rgb in candidates], axis=0),
+    )
+
+
+def exhaustive_integer_mix_best(
+    target_rgb: Sequence[float],
+    base_names: Sequence[str],
+    *,
+    max_parts: int = 10,
+    max_components: int = 5,
+    max_part_per_pigment: int = 5,
+    catalog: IntegerRecipeCatalog | None = None,
+) -> Tuple[List[Tuple[str, int]], np.ndarray, float]:
+    """Return the globally best recipe from the bounded integer catalogue."""
+    if catalog is None:
+        catalog = build_integer_recipe_catalog(
+            base_names,
+            max_parts=max_parts,
+            max_components=max_components,
+            max_part_per_pigment=max_part_per_pigment,
+        )
+    errors = color_space.deltaE_lab_rows(catalog.rgbs, target_rgb)
+    best_index = int(np.argmin(errors))
+    best_rgb = catalog.rgbs[best_index].copy()
+    best_error = color_space.deltaE_lab(best_rgb, target_rgb)
+    return list(catalog.entries[best_index]), best_rgb, best_error
+
+
 def _normalize_weights(raw_weights: Sequence[float]) -> np.ndarray:
     weights = np.clip(np.asarray(raw_weights, dtype=float), 0.0, 1.0)
     total = float(weights.sum())
@@ -294,6 +370,197 @@ def _local_improve_parts(
                     improved = True
                     active_count = int(np.count_nonzero(best_parts))
     return best_parts, best_rgb, best_err
+
+
+def _normalize_recipe_parts(parts: Sequence[int], max_parts: int, max_components: int) -> np.ndarray:
+    arr = np.maximum(np.array(parts, dtype=int), 0)
+    max_parts = max(1, int(max_parts))
+    max_components = max(1, int(max_components))
+
+    while int(np.count_nonzero(arr)) > max_components:
+        nonzero = np.flatnonzero(arr > 0)
+        arr[int(min(nonzero, key=lambda i: arr[i]))] = 0
+
+    while int(arr.sum()) > max_parts:
+        nonzero = np.flatnonzero(arr > 0)
+        arr[int(max(nonzero, key=lambda i: arr[i]))] -= 1
+
+    if int(arr.sum()) <= 0:
+        arr[0] = 1
+    return arr
+
+
+def _random_recipe_parts(
+    rng: np.random.Generator,
+    n: int,
+    max_parts: int,
+    max_components: int,
+    ranked_indices: Sequence[int] | None = None,
+) -> np.ndarray:
+    k = int(rng.integers(1, min(n, max_components) + 1))
+    if ranked_indices is not None and rng.random() < 0.75:
+        pool_size = min(n, max(k + 2, max_components))
+        pool = np.array(ranked_indices[:pool_size], dtype=int)
+        chosen = rng.choice(pool, size=k, replace=False)
+    else:
+        chosen = rng.choice(n, size=k, replace=False)
+
+    total = int(rng.integers(k, max_parts + 1))
+    local = np.ones(k, dtype=int)
+    for _ in range(total - k):
+        local[int(rng.integers(0, k))] += 1
+
+    parts = np.zeros(n, dtype=int)
+    parts[chosen] = local
+    return parts
+
+
+def _hillclimb_refine_parts(
+    target: np.ndarray,
+    names: Sequence[str],
+    start_parts: Sequence[int],
+    *,
+    max_parts: int,
+    max_components: int,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    base_rgbs = np.array([BASE_PALETTE[n] for n in names], dtype=float)
+    cache: dict[tuple[int, ...], tuple[float, np.ndarray]] = {}
+
+    def evaluate(candidate_parts: Sequence[int]) -> tuple[float, np.ndarray]:
+        key = tuple(int(x) for x in candidate_parts)
+        cached = cache.get(key)
+        if cached is None:
+            if sum(key) <= 0:
+                cached = (float("inf"), target.copy())
+            else:
+                rgb = mix_learned(np.array(key, dtype=float), base_rgbs, names)
+                cached = (color_space.deltaE_lab(rgb, target), rgb)
+            cache[key] = cached
+        return cached
+
+    best_parts = _normalize_recipe_parts(start_parts, max_parts, max_components)
+    best_err, best_rgb = evaluate(best_parts)
+
+    improved = True
+    while improved:
+        improved = False
+        active = np.flatnonzero(best_parts > 0)
+        candidates = []
+
+        for src in active:
+            for dst in range(len(best_parts)):
+                if int(src) == dst:
+                    continue
+                if best_parts[dst] == 0 and int(np.count_nonzero(best_parts)) >= max_components:
+                    continue
+                candidate = best_parts.copy()
+                candidate[int(src)] -= 1
+                candidate[dst] += 1
+                candidates.append(candidate)
+
+        if int(best_parts.sum()) < max_parts:
+            for dst in range(len(best_parts)):
+                if best_parts[dst] == 0 and int(np.count_nonzero(best_parts)) >= max_components:
+                    continue
+                candidate = best_parts.copy()
+                candidate[dst] += 1
+                candidates.append(candidate)
+
+        if int(best_parts.sum()) > 1:
+            for src in active:
+                candidate = best_parts.copy()
+                candidate[int(src)] -= 1
+                candidates.append(candidate)
+
+        for candidate in candidates:
+            candidate = _normalize_recipe_parts(candidate, max_parts, max_components)
+            err, rgb = evaluate(candidate)
+            if err + 1e-12 < best_err:
+                best_parts, best_err, best_rgb = candidate, err, rgb
+                improved = True
+
+    return best_parts, best_rgb, best_err
+
+
+def multistart_hillclimb_mix_best(
+    target_rgb: Sequence[float],
+    base_names: Sequence[str],
+    *,
+    max_parts: int = 20,
+    max_components: int = 10,
+    starts: int = 45,
+    seed_entries: Sequence[Tuple[str, int]] | None = None,
+    seed: int = 0,
+) -> Tuple[List[Tuple[str, int]], np.ndarray, float]:
+    """
+    Search integer-parts recipes with seeded multistart coordinate descent.
+
+    Starts from the existing recipe and several random whole-part recipes, then
+    repeatedly applies one-part transfer/add/remove moves until locally optimal.
+    """
+    target = np.array(target_rgb, dtype=float)
+    names = list(base_names)
+    rng = np.random.default_rng(seed)
+    max_parts = max(1, int(max_parts))
+    max_components = max(1, min(int(max_components), len(names), max_parts))
+
+    start_vectors: list[np.ndarray] = []
+    if seed_entries:
+        seed_parts = np.zeros(len(names), dtype=int)
+        name_to_index = {name: i for i, name in enumerate(names)}
+        for name, amount in seed_entries:
+            if name in name_to_index:
+                seed_parts[name_to_index[name]] += int(amount)
+        if int(seed_parts.sum()) > 0:
+            start_vectors.append(seed_parts)
+
+    single_scores = []
+    for i, name in enumerate(names):
+        err = color_space.deltaE_lab(np.array(BASE_PALETTE[name], dtype=float), target)
+        single_scores.append((err, i))
+        one = np.zeros(len(names), dtype=int)
+        one[i] = min(max_parts, max(1, max_parts // 2))
+        start_vectors.append(one)
+    ranked_indices = [i for _err, i in sorted(single_scores)]
+
+    while len(start_vectors) < max(1, int(starts)):
+        start_vectors.append(
+            _random_recipe_parts(
+                rng,
+                len(names),
+                max_parts,
+                max_components,
+                ranked_indices=ranked_indices,
+            )
+        )
+
+    best_parts = None
+    best_rgb = target.copy()
+    best_err = float("inf")
+    seen: set[tuple[int, ...]] = set()
+    for start_parts in start_vectors[:max(1, int(starts))]:
+        key = tuple(int(x) for x in _normalize_recipe_parts(start_parts, max_parts, max_components))
+        if key in seen:
+            continue
+        seen.add(key)
+        parts, rgb, err = _hillclimb_refine_parts(
+            target,
+            names,
+            key,
+            max_parts=max_parts,
+            max_components=max_components,
+        )
+        if err < best_err:
+            best_parts, best_rgb, best_err = parts, rgb, err
+
+    if best_parts is None:
+        best_parts = np.zeros(len(names), dtype=int)
+        best_parts[ranked_indices[0]] = 1
+        base_rgbs = np.array([BASE_PALETTE[n] for n in names], dtype=float)
+        best_rgb = mix_learned(best_parts, base_rgbs, names)
+        best_err = color_space.deltaE_lab(best_rgb, target)
+
+    return _parts_to_entries(names, best_parts), best_rgb, best_err
 
 
 def stochastic_integer_mix_best(
@@ -641,35 +908,20 @@ def _recipe_worker(
     max_components,
     lambda_components,
     lambda_parts,
-    genetic_retry_enabled=True,
-    genetic_retry_delta_e=1.0,
-    genetic_retry_max_parts=20,
-    genetic_retry_components=10,
-    genetic_retry_population=180,
-    genetic_retry_generations=160,
+    recipe_hillclimb_starts=45,
+    recipe_hillclimb_seed=0,
 ):
-    """Runs integer_mix_best for a single centroid color."""
+    """Runs multistart hill-climb recipe search for a single centroid color."""
     color = np.array(color_rgb_list, dtype=float)
-    entries, approx_rgb, err = integer_mix_best(
+    del lambda_components, lambda_parts
+    entries, approx_rgb, err = multistart_hillclimb_mix_best(
         color,
         base_names,
         max_parts=max_parts,
         max_components=max_components,
-        prefer_simple_lambda_components=lambda_components,
-        prefer_simple_lambda_parts=lambda_parts,
+        starts=int(recipe_hillclimb_starts),
+        seed=int(recipe_hillclimb_seed),
     )
-    if bool(genetic_retry_enabled) and err > float(genetic_retry_delta_e):
-        genetic_entries, genetic_rgb, genetic_err = genetic_integer_mix_best(
-            color,
-            base_names,
-            max_parts=int(genetic_retry_max_parts),
-            max_components=int(genetic_retry_components),
-            population=int(genetic_retry_population),
-            generations=int(genetic_retry_generations),
-            seed_entries=entries,
-        )
-        if genetic_err < err:
-            entries, approx_rgb, err = genetic_entries, genetic_rgb, genetic_err
 
     return {
         "entries": [(str(n), int(p)) for (n, p) in entries],
