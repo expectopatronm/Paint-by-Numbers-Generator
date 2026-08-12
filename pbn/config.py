@@ -8,7 +8,7 @@ BASE_PALETTE = {
     "burnt_umber": (44, 28, 22),
     "cobalt_blue": (36, 42, 85),
     "indian_yellow": (219, 125, 21),
-    # "indigo": (14, 17, 33),
+    "indigo": (14, 17, 33),
     "ivory_black": (15, 18, 22),
     "olive_green": (73, 88, 37),
     "paynes_gray": (13, 20, 25),
@@ -80,9 +80,9 @@ DEFAULT_CONFIG = {
     #     used: outline page, frame underlay, per-color underlay, and
     #     centerline SVG tracing.
     #   - Use black/dark lines on a white/light background.
-    "input": "pics/33.jpg",
+    "input": "pics/100.PNG",
     "pdf": "paint_by_numbers_guide.pdf",
-    "external_sketch": "pics/33_sketch.png",
+    "external_sketch": "pics/100_sketch.png",
     # recipe_cache:
     #   - JSON cache of cluster target colors and recipe results.
     #   - Written after recipe generation so optimizer experiments can
@@ -129,10 +129,16 @@ DEFAULT_CONFIG = {
     #   - Optional (width, height) tuple to resize the image BEFORE
     #     clustering (for speed and noise reduction).
     #   - None → use the full-resolution image for clustering.
-    # Clustering is fixed to K-Means in perceptual CIELAB space.
-    # Potts/MRF smoothing below handles speckle reduction after clustering.
+    # clustering_method:
+    #   - "recipe_aware" selects only colours produced by valid integer paint
+    #     recipes. This is the default and guarantees every map colour has a
+    #     practical recipe.
+    #   - "lab_kmeans" retains the previous unconstrained LAB K-Means mode.
     "colors": 20,
     "resize": None,  # e.g. (W, H)
+    "clustering_method": "recipe_aware",
+    "recipe_clustering_iterations": 8,
+    "recipe_clustering_shortlist": 384,
     # mrf_smoothing:
     #   - If True, apply Potts/MRF smoothing after clustering and label
     #     upsampling, before tiny-region cleanup and PDF rendering.
@@ -166,27 +172,23 @@ DEFAULT_CONFIG = {
     "palette": list(BASE_PALETTE.keys()),
     "components": 5,
     "max_parts": 10,
-    # genetic_retry_enabled:
-    #   - If True, run a genetic integer optimizer when the normal exhaustive
-    #     integer search returns a recipe above genetic_retry_delta_e.
-    #   - This keeps the old deterministic search as the first pass, then
-    #     uses a larger integer recipe space only for difficult colors.
-    # genetic_retry_delta_e:
-    #   - Trigger threshold. Recipes with Delta E above this value get the
-    #     genetic fallback search.
-    # genetic_retry_max_parts:
-    #   - Maximum total parts allowed in a genetic fallback recipe.
-    # genetic_retry_components:
-    #   - Maximum number of pigments allowed in a genetic fallback recipe.
-    # genetic_retry_population / genetic_retry_generations:
-    #   - Search budget for the genetic optimizer. Higher values can improve
-    #     hard colors but increase runtime.
-    "genetic_retry_enabled": True,
-    "genetic_retry_delta_e": 1.0,
-    "genetic_retry_max_parts": 20,
-    "genetic_retry_components": 10,
-    "genetic_retry_population": 180,
-    "genetic_retry_generations": 160,
+    # max_part_per_pigment:
+    #   - Largest whole-number amount allowed for any single pigment.
+    #   - Recipes are reduced, so 2:4 is stored and printed as 1:2.
+    "max_part_per_pigment": 5,
+    "recipe_optimizer": "exhaustive_integer",
+    # recipe_hillclimb_starts:
+    #   - Number of seeded/random starts for the multistart hill-climb
+    #     recipe optimizer. Higher values can improve hard colors but
+    #     increase runtime.
+    # recipe_hillclimb_seed:
+    #   - Base random seed for reproducible hill-climb starts.
+    "recipe_hillclimb_starts": 45,
+    "recipe_hillclimb_seed": 0,
+    # recipe_target_delta_e:
+    #   - Reporting target for recipe accuracy. The optimizer minimizes
+    #     Delta E directly; this value documents the desired threshold.
+    "recipe_target_delta_e": 0.5,
     # delta_e_method:
     #   - "colour_ciede2000" uses the colour-science implementation of
     #     CIEDE2000 for recipe scoring (default).
@@ -376,7 +378,7 @@ DEFAULT_CONFIG = {
     #   - If longest_side >= this value, no upscaling is performed.
     #   - If longest_side < this value, SUPIR chooses the smallest
     #     supir_upscale_choices factor that reaches the threshold.
-    "enable_upscale": True,
+    "enable_upscale": False,
     "upscale_ok_min_long": 3000,
     "supir_repo_dir": "SUPIR",
     "supir_python": "venv/Scripts/python.exe",

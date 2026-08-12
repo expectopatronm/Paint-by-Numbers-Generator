@@ -142,7 +142,7 @@ The generator is a chain of image-processing, color-matching, and layout steps.
 flowchart LR
     A["Source image"] --> B["Optional SUPIR upscale"]
     B --> C["Optional pre-brighten"]
-    C --> D["CIELAB K-Means clustering"]
+    C --> D["Recipe-aware attainable-color clustering"]
     D --> E["Potts/MRF smoothing"]
     E --> F["Region cleanup"]
     F --> G["Integer recipe search"]
@@ -161,16 +161,23 @@ flowchart LR
 
 ## Color Clustering
 
-The image is clustered in perceptual CIELAB space with K-Means:
+By default, the image is clustered using colours from the valid integer-recipe
+catalogue:
 
 ```python
 colors = 20
 resize = None
+clustering_method = "recipe_aware"
 ```
 
-`colors = 20` means the image is reduced to 20 paint colors. `resize = None` means clustering uses the full-resolution image rather than a smaller proxy.
+`colors = 20` means the image is reduced to 20 attainable paint mixtures.
+`resize = None` means clustering uses the full-resolution image rather than a
+smaller proxy. The earlier unconstrained mode remains available with
+`clustering_method = "lab_kmeans"`.
 
-CIELAB is used because it is closer to human color perception than raw RGB distances. This matters because a small numerical RGB difference can be perceptually large, and a large RGB difference can sometimes be perceptually modest.
+Recipe candidates and image colours are compared with CIEDE2000 in CIELAB.
+This prevents the generator from first inventing an arbitrary cluster colour
+that the permitted whole-number recipes cannot reproduce.
 
 After clustering, the label map is upsampled to full image size and can be smoothed.
 
@@ -231,9 +238,19 @@ The default first-pass search is still deterministic and exhaustive:
 ```python
 components = 5
 max_parts = 10
+max_part_per_pigment = 5
 ```
 
-That means the first pass tries integer recipes up to 10 total parts and up to 5 pigments.
+The generator builds a reusable catalogue containing every valid recipe with:
+
+- no more than 10 total parts,
+- no more than 5 pigments,
+- no more than 5 parts of any pigment, and
+- only reduced ratios (`2:4` is stored as `1:2`).
+
+Every target color is compared with the complete catalogue, so the result is
+the global best match under these practical whole-part limits. There is no
+random search and repeated runs return the same recipe.
 
 Example recipe:
 
@@ -268,63 +285,13 @@ Important caveat: Delta E here measures the software model. It does not guarante
 
 ---
 
-## Genetic Algorithm Fallback
+## Exact Integer Recipe Catalogue
 
-The newest recipe logic is:
-
-```text
-normal exhaustive integer search
-if Delta E <= 1.0:
-    accept recipe
-else:
-    run genetic integer optimizer
-```
-
-The genetic fallback exists because some colors cannot be matched well inside the smaller `10 parts / 5 pigments` first-pass search.
-
-The genetic fallback searches a larger integer recipe space:
-
-```python
-genetic_retry_enabled = True
-genetic_retry_delta_e = 1.0
-genetic_retry_max_parts = 20
-genetic_retry_components = 10
-genetic_retry_population = 180
-genetic_retry_generations = 160
-```
-
-It works directly on integer recipes. That is important. A continuous optimizer can find fractional paint weights like `0.613 titanium_white`, but those are not useful at the palette. The genetic optimizer searches recipes that are already printable as whole parts.
-
-A recipe is represented internally like an integer vector:
-
-```text
-[alizarin, sienna, umber, cobalt, indian_yellow, black, olive, paynes, white, vandyke, ochre]
-```
-
-The genetic optimizer uses:
-
-- a population of candidate recipes,
-- parent selection weighted by lower Delta E,
-- crossover between recipes,
-- mutation by moving/adding/removing paint parts,
-- elitism so the best candidates are not lost,
-- a final one-part local refinement.
-
-For a previously problematic gray target, the old recipe was:
-
-```text
-1 burnt_sienna + 2 cobalt_blue + 5 titanium_white + 1 yellow_ochre
-Delta E: about 2.00
-```
-
-The genetic fallback found recipes below `Delta E <= 1.0`, for example:
-
-```text
-1 burnt_sienna + 2 cobalt_blue + 1 indian_yellow + 1 paynes_gray + 7 titanium_white
-Delta E: about 0.54
-```
-
-This does not solve every real-world paint mismatch, but it makes the digital recipe search much stronger while keeping recipes as integer parts.
+The catalogue is generated once per run and reused for all target colors.
+Equivalent scaled recipes are discarded using their greatest common divisor.
+Candidate colors are batch-converted to CIELAB and scored with CIEDE2000, which
+keeps exhaustive matching fast even when the catalogue contains tens of
+thousands of valid recipes.
 
 ---
 

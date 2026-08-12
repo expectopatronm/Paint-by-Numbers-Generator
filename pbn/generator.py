@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import json
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from types import SimpleNamespace
 from typing import List
 
@@ -39,8 +38,9 @@ from .image_ops import (
 )
 from .imprimatura import _prev_highlight_rgb, choose_imprimatura_target_from_image
 from .integrations import _maybe_upscale_input, rmbg_alpha_matte
-from .mixing import _init_worker, _recipe_worker, genetic_integer_mix_best, integer_mix_best, recipe_text
+from .mixing import build_integer_recipe_catalog, exhaustive_integer_mix_best, recipe_text
 from .pdf_render import draw_color_key, new_fig
+from .recipe_clustering import recipe_aware_cluster
 from .svg_trace import _auto_grid_step, run_centerline_trace
 
 DELTA_E_METHOD = "colour_ciede2000"
@@ -128,7 +128,7 @@ def main(config: dict | None = None):
     Hs, Ws, _ = data_small.shape
     pixels_small = data_small.reshape((-1, 3)).astype(np.float32)
 
-    # K-Means clustering in perceptual LAB space.
+    # Convert rows for the optional unconstrained LAB K-Means mode.
     def rgbrow_to_labrows(arr_uint8):
         labs = []
         for r, g, b in arr_uint8:
@@ -137,14 +137,39 @@ def main(config: dict | None = None):
         return np.array(labs, dtype=np.float32)
 
     print("[2/6] Clustering image colors...")
-    feats = rgbrow_to_labrows(pixels_small.astype(np.uint8))
-    kmeans = KMeans(n_clusters=args.colors, random_state=42, n_init=8)
-    kmeans.fit(feats)
-    labels_small = kmeans.labels_.reshape(Hs, Ws).astype(np.uint8)
+    clustering_method = str(getattr(args, "clustering_method", "recipe_aware")).lower()
+    recipe_catalog = None
+    selected_recipe_indices = None
+    names = args.palette
+    max_part_per_pigment = int(getattr(args, "max_part_per_pigment", 5))
 
-    centroids_lab = kmeans.cluster_centers_.astype(np.float32)
-    centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
-    centroids = np.array(centroids_rgb, dtype=np.uint8)
+    if clustering_method == "recipe_aware":
+        recipe_catalog = build_integer_recipe_catalog(
+            names,
+            max_parts=int(args.max_parts),
+            max_components=int(args.components),
+            max_part_per_pigment=max_part_per_pigment,
+        )
+        labels_small, centroids, selected_recipe_indices = recipe_aware_cluster(
+            data_small,
+            int(args.colors),
+            recipe_catalog,
+            iterations=int(getattr(args, "recipe_clustering_iterations", 8)),
+            shortlist=int(getattr(args, "recipe_clustering_shortlist", 384)),
+        )
+        print(f"Recipe-aware clustering selected {len(selected_recipe_indices)} attainable colours.")
+    elif clustering_method == "lab_kmeans":
+        feats = rgbrow_to_labrows(pixels_small.astype(np.uint8))
+        kmeans = KMeans(n_clusters=args.colors, random_state=42, n_init=8)
+        kmeans.fit(feats)
+        labels_small = kmeans.labels_.reshape(Hs, Ws).astype(np.uint8)
+        centroids_lab = kmeans.cluster_centers_.astype(np.float32)
+        centroids_rgb = [np.clip(np.rint(lab_to_rgb8(lab)), 0, 255) for lab in centroids_lab]
+        centroids = np.array(centroids_rgb, dtype=np.uint8)
+    else:
+        raise ValueError(
+            f"Unknown clustering_method={clustering_method!r}; use 'recipe_aware' or 'lab_kmeans'."
+        )
 
     # Upsample labels to full res
     labels_full = Image.fromarray(labels_small, mode="L").resize((orig_w, orig_h), resample=Image.NEAREST)
@@ -172,96 +197,45 @@ def main(config: dict | None = None):
     )
 
     # Build recipes (MIXED palette) — parallelized
-    names = args.palette
     all_entries, all_recipes, approx_rgbs, deltaEs = [], [], [], []
 
-    centroids_list = [c.astype(float).tolist() for c in centroids]
-
-    print(f"[4/6] Building paint recipes for {len(centroids_list)} colors...")
-    if args.parallel and len(centroids_list) > 1:
-        max_workers = int(args.workers) if args.workers else (os.cpu_count() or 1)
-        # Guard against silly over-commit (optional, but polite)
-        max_workers = max(1, min(max_workers, len(centroids_list)))
-
-        tasks = {}
-        with ProcessPoolExecutor(
-                max_workers=max_workers,
-                initializer=_init_worker,
-                initargs=(
-                    BASE_PALETTE,
-                    DARKEN_PER_PIGMENT,
-                    str(args.delta_e_method),
-                ),
-        ) as ex:
-            for idx, c in enumerate(centroids_list):
-                fut = ex.submit(
-                    _recipe_worker,
-                    c,
-                    names,
-                    int(args.max_parts),
-                    int(args.components),
-                    float(args.get("prefer_simple_lambda_components", 0.03) if isinstance(args, dict) else getattr(args,
-                                                                                                                   "prefer_simple_lambda_components",
-                                                                                                                   0.03) if hasattr(
-                        args, "prefer_simple_lambda_components") else 0.03),
-                    float(args.get("prefer_simple_lambda_parts", 0.01) if isinstance(args, dict) else getattr(args,
-                                                                                                              "prefer_simple_lambda_parts",
-                                                                                                              0.01) if hasattr(
-                        args, "prefer_simple_lambda_parts") else 0.01),
-                    bool(getattr(args, "genetic_retry_enabled", True)),
-                    float(getattr(args, "genetic_retry_delta_e", 1.0)),
-                    int(getattr(args, "genetic_retry_max_parts", 20)),
-                    int(getattr(args, "genetic_retry_components", 10)),
-                    int(getattr(args, "genetic_retry_population", 180)),
-                    int(getattr(args, "genetic_retry_generations", 160)),
-                )
-
-                tasks[fut] = idx
-
-            results = [None] * len(centroids_list)
-            for fut in tqdm(
-                as_completed(tasks),
-                total=len(tasks),
-                desc="Recipes",
-                unit="color",
-            ):
-                results[tasks[fut]] = fut.result()
-
-        for res in results:
-            entries = res["entries"]
-            approx = np.array(res["approx_rgb"], dtype=float)
-            err = res["err"]
-            all_entries.append(entries)
-            all_recipes.append(recipe_text(entries))
-            approx_rgbs.append(approx)
-            deltaEs.append(err)
+    print(f"[4/6] Resolving exact integer recipes for {len(centroids)} colors...")
+    if recipe_catalog is None:
+        recipe_catalog = build_integer_recipe_catalog(
+            names,
+            max_parts=int(args.max_parts),
+            max_components=int(args.components),
+            max_part_per_pigment=max_part_per_pigment,
+        )
+    if selected_recipe_indices is not None:
+        recipe_results = [
+            (list(recipe_catalog.entries[index]), recipe_catalog.rgbs[index].copy(), 0.0)
+            for index in selected_recipe_indices
+        ]
     else:
-        # Fallback: single-core
-        for col in tqdm(centroids.astype(np.float32), total=len(centroids), desc="Recipes", unit="color"):
-            entries, approx_rgb, err = integer_mix_best(
-                col,
-                names,
-                max_parts=args.max_parts,
-                max_components=args.components,
-            )
-            if bool(getattr(args, "genetic_retry_enabled", True)) and err > float(getattr(args, "genetic_retry_delta_e", 1.0)):
-                genetic_entries, genetic_rgb, genetic_err = genetic_integer_mix_best(
-                    col,
-                    names,
-                    max_parts=int(getattr(args, "genetic_retry_max_parts", 20)),
-                    max_components=int(getattr(args, "genetic_retry_components", 10)),
-                    population=int(getattr(args, "genetic_retry_population", 180)),
-                    generations=int(getattr(args, "genetic_retry_generations", 160)),
-                    seed_entries=entries,
-                )
-                if genetic_err < err:
-                    entries, approx_rgb, err = genetic_entries, genetic_rgb, genetic_err
-            all_entries.append(entries)
-            all_recipes.append(recipe_text(entries))
-            approx_rgbs.append(np.array(approx_rgb, dtype=float))
-            deltaEs.append(err)
+        recipe_results = [
+            exhaustive_integer_mix_best(col, names, catalog=recipe_catalog)
+            for col in tqdm(centroids.astype(np.float32), total=len(centroids), desc="Recipes", unit="color")
+        ]
+    for entries, approx_rgb, err in recipe_results:
+        all_entries.append(entries)
+        all_recipes.append(recipe_text(entries))
+        approx_rgbs.append(np.array(approx_rgb, dtype=float))
+        deltaEs.append(err)
 
     approx_uint8 = np.clip(np.rint(np.array(approx_rgbs)), 0, 255).astype(np.uint8)
+    recipe_target_delta_e = float(getattr(args, "recipe_target_delta_e", 0.5))
+    recipe_misses = [
+        (i + 1, float(err))
+        for i, err in enumerate(deltaEs)
+        if float(err) > recipe_target_delta_e
+    ]
+    if recipe_misses:
+        worst_color, worst_err = max(recipe_misses, key=lambda item: item[1])
+        print(
+            f"Recipe target missed for {len(recipe_misses)}/{len(deltaEs)} colors "
+            f"(target dE<={recipe_target_delta_e:.2f}; worst #{worst_color} dE={worst_err:.3f})."
+        )
 
     if bool(getattr(args, "write_recipe_cache", True)):
         cache_path = str(getattr(args, "recipe_cache", "outputs/recipe_targets.json"))
@@ -273,13 +247,11 @@ def main(config: dict | None = None):
                 "palette": list(args.palette),
                 "max_parts": int(args.max_parts),
                 "components": int(args.components),
+                "max_part_per_pigment": max_part_per_pigment,
                 "delta_e_method": str(args.delta_e_method),
-                "genetic_retry_enabled": bool(getattr(args, "genetic_retry_enabled", True)),
-                "genetic_retry_delta_e": float(getattr(args, "genetic_retry_delta_e", 1.0)),
-                "genetic_retry_max_parts": int(getattr(args, "genetic_retry_max_parts", 20)),
-                "genetic_retry_components": int(getattr(args, "genetic_retry_components", 10)),
-                "genetic_retry_population": int(getattr(args, "genetic_retry_population", 180)),
-                "genetic_retry_generations": int(getattr(args, "genetic_retry_generations", 160)),
+                "clustering_method": clustering_method,
+                "recipe_optimizer": "exhaustive_integer",
+                "recipe_target_delta_e": recipe_target_delta_e,
                 "color_targets": [
                     {
                         "color_number": int(i + 1),
@@ -407,7 +379,12 @@ def main(config: dict | None = None):
         ax1 = fig.add_subplot(gs[0, 0]); ax2 = fig.add_subplot(gs[1, 0]); ax3 = fig.add_subplot(gs[:, 1])
         ax1.imshow(rgb_full); ax1.set_title("Original", pad=2); ax1.axis("off")
         ax2.imshow(pbn_image)
-        ax2.set_title(f"Paint by Numbers ({args.colors} colors) • cluster=LAB K-Means • mixmodel=learned • max parts≤{args.max_parts}", pad=2)
+        cluster_label = "recipe-aware" if clustering_method == "recipe_aware" else "LAB K-Means"
+        ax2.set_title(
+            f"Paint by Numbers ({args.colors} colors) • cluster={cluster_label} "
+            f"• mixmodel=learned • max parts≤{args.max_parts}",
+            pad=2,
+        )
         ax2.axis("off")
         draw_color_key(ax3, centroids, all_recipes, all_entries, BASE_PALETTE,
                        used_indices=list(range(args.colors)),
@@ -425,11 +402,12 @@ def main(config: dict | None = None):
             rgb_full, mode=imp_mode, target_L=50.0, chroma_s=0.25
         )
 
-        imp_entries, imp_rgb, imp_dE = integer_mix_best(
+        imp_entries, imp_rgb, imp_dE = exhaustive_integer_mix_best(
             imp_target_rgb,
             args.palette,
             max_parts=6,
             max_components=3,
+            max_part_per_pigment=max_part_per_pigment,
         )
         imp_rgb = np.clip(np.rint(imp_rgb), 0, 255).astype(np.uint8)
         imp_L = Lstar_from_rgb(imp_rgb)
