@@ -284,11 +284,13 @@ recipe color; comparing the recipe color with itself would always report a
 misleading zero.
 
 The PDF translates both errors into clearly defined percentages while retaining
-raw Delta E. `Delta E=178% goal (0.89)` means the error is 178% of the
-configured `0.50` Delta E target; it does not mean the color is 178% different.
-`Delta L=-1.97% darker` means Delta L* is -1.97 percentage points on the complete
-0-100 L* scale. Positive is lighter and negative is darker. This is deliberately
-not a percentage relative to the target L*, which becomes unstable near black.
+raw Delta E. `Err=143% tol (Delta E=4.30)` means the error uses 143% of
+the configured acceptable Delta E tolerance of `3.0`; it does not mean the color
+is 143% different. Zero percent is a perfect match, 50% uses half the tolerance,
+and values up to 100% are inside the reporting tolerance. `Delta L=-1.97% darker`
+means Delta L* is -1.97 percentage points on the complete 0-100 L* scale.
+Positive is lighter and negative is darker. This is deliberately not a
+percentage relative to the target L*, which becomes unstable near black.
 
 The current default method is:
 
@@ -298,9 +300,10 @@ delta_e_method = "colour_ciede2000"
 
 Lower is better. In practical terms:
 
-- `Delta E <= 1.0`: excellent digital match.
-- `Delta E ~ 1-2`: visible but often acceptable.
-- `Delta E > 2`: worth investigating or retrying.
+- `Delta E <= 1.0` (up to 33% tolerance): excellent digital match.
+- `Delta E <= 2.0` (up to 67% tolerance): close match.
+- `Delta E <= 3.0` (up to 100% tolerance): acceptable reporting range.
+- `Delta E > 3.0` (above 100% tolerance): noticeable difference worth reviewing.
 
 Important caveat: Delta E here measures the software model. It does not guarantee your physical tube paints will match perfectly. The model predicts from RGB pigment constants and Mixbox. Real paint tubes can behave differently, especially in tints with strong pigments.
 

@@ -24,7 +24,7 @@ def draw_color_key(
     show_components=True,
     deltaEs=None,
     deltaLs=None,
-    delta_e_target=None,
+    delta_e_tolerance=None,
     left_pad=None,
     right_margin=None,
     swatch_step=None,
@@ -65,9 +65,9 @@ def draw_color_key(
 
         tweak_str = ""
         if deltaEs is not None:
-            if delta_e_target is not None and float(delta_e_target) > 0:
-                color_pct = 100.0 * float(deltaEs[ci]) / float(delta_e_target)
-                tweak_str += f" • ΔE={color_pct:.0f}% goal ({deltaEs[ci]:.2f})"
+            if delta_e_tolerance is not None and float(delta_e_tolerance) > 0:
+                tolerance_pct = 100.0 * float(deltaEs[ci]) / float(delta_e_tolerance)
+                tweak_str += f" • Err={tolerance_pct:.0f}% tol (ΔE={deltaEs[ci]:.2f})"
             else:
                 tweak_str += f" • ΔE≈{deltaEs[ci]:.2f}"
         if deltaLs is not None:
@@ -85,7 +85,18 @@ def draw_color_key(
         full_text_band = 16.5 - RIGHT_MARGIN - LEFT_PAD
         frac = np.clip(avail_units / max(1.0, full_text_band), 0.2, 1.2)
         local_wrap = max(20, int(round(wrap_width * float(frac))))
-        ax.text(LEFT_PAD, row_idx + 0.5, _tw.fill(text_str, width=local_wrap), va="center", fontsize=8, wrap=True, zorder=1.0)
+        dense_key = len(used_indices) >= 18
+        text_size = 6.5 if dense_key else 8
+        ax.text(
+            LEFT_PAD,
+            row_idx + 0.5,
+            _tw.fill(text_str, width=local_wrap),
+            va="center",
+            fontsize=text_size,
+            linespacing=0.9 if dense_key else 1.2,
+            wrap=True,
+            zorder=1.0,
+        )
 
         if show_components and n_comp > 0:
             for j, name in enumerate(row_comp_names):
@@ -97,7 +108,11 @@ def draw_color_key(
     ax.set_ylim(0, len(used_indices))
     ax.invert_yaxis()
     ax.axis("off")
-    t = ax.set_title(title + " (ΔE %=goal; ΔL %=full L* scale)", pad=3)
+    if delta_e_tolerance is not None and float(delta_e_tolerance) > 0:
+        tolerance_note = f"Color error %={float(delta_e_tolerance):g} tolerance"
+    else:
+        tolerance_note = "Color error=raw ΔE"
+    t = ax.set_title(title + f" ({tolerance_note}; ΔL %=full L* scale)", pad=3)
     t.set_wrap(True)
 
 # ---------------------------

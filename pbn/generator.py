@@ -306,17 +306,18 @@ def main(config: dict | None = None):
             f"(limit |dL*|<={recipe_max_delta_l:.2f}; "
             f"worst #{worst_color} dL*={worst_delta_l:+.3f})."
         )
-    recipe_target_delta_e = float(getattr(args, "recipe_target_delta_e", 0.5))
+    recipe_acceptable_delta_e = float(getattr(args, "recipe_acceptable_delta_e", 3.0))
     recipe_misses = [
         (i + 1, float(err))
         for i, err in enumerate(deltaEs)
-        if float(err) > recipe_target_delta_e
+        if float(err) > recipe_acceptable_delta_e
     ]
     if recipe_misses:
         worst_color, worst_err = max(recipe_misses, key=lambda item: item[1])
         print(
-            f"Recipe target missed for {len(recipe_misses)}/{len(deltaEs)} colors "
-            f"(target dE<={recipe_target_delta_e:.2f}; worst #{worst_color} dE={worst_err:.3f})."
+            f"Recipe tolerance missed for {len(recipe_misses)}/{len(deltaEs)} colors "
+            f"(acceptable dE<={recipe_acceptable_delta_e:.2f}; "
+            f"worst #{worst_color} dE={worst_err:.3f})."
         )
 
     if bool(getattr(args, "write_recipe_cache", True)):
@@ -333,7 +334,7 @@ def main(config: dict | None = None):
                 "delta_e_method": str(args.delta_e_method),
                 "clustering_method": clustering_method,
                 "recipe_optimizer": "exhaustive_integer",
-                "recipe_target_delta_e": recipe_target_delta_e,
+                "recipe_acceptable_delta_e": recipe_acceptable_delta_e,
                 "recipe_ideal_delta_l": recipe_ideal_delta_l,
                 "recipe_max_delta_l": recipe_max_delta_l,
                 "recipe_selection": "lowest_delta_e_with_absolute_delta_l_guardrail",
@@ -351,9 +352,9 @@ def main(config: dict | None = None):
                         "predicted_rgb": [int(x) for x in np.rint(approx_uint8[i]).astype(int).tolist()],
                         "delta_e": float(deltaEs[i]),
                         "delta_l": float(deltaLs[i]),
-                        "delta_e_target_percent": (
-                            100.0 * float(deltaEs[i]) / recipe_target_delta_e
-                            if recipe_target_delta_e > 0 else None
+                        "delta_e_tolerance_percent": (
+                            100.0 * float(deltaEs[i]) / recipe_acceptable_delta_e
+                            if recipe_acceptable_delta_e > 0 else None
                         ),
                         "delta_l_scale_percent": float(deltaLs[i]),
                         "ideal_value_met": abs(float(deltaLs[i])) <= recipe_ideal_delta_l,
@@ -477,10 +478,8 @@ def main(config: dict | None = None):
         ax1 = fig.add_subplot(gs[0, 0]); ax2 = fig.add_subplot(gs[1, 0]); ax3 = fig.add_subplot(gs[:, 1])
         ax1.imshow(rgb_full); ax1.set_title("Original", pad=2); ax1.axis("off")
         ax2.imshow(pbn_image)
-        cluster_label = "recipe-aware" if clustering_method == "recipe_aware" else "LAB K-Means"
         ax2.set_title(
-            f"Paint by Numbers ({args.colors} colors) • cluster={cluster_label} "
-            f"• mixmodel=learned • max parts≤{args.max_parts}",
+            f"Predicted Painted Result\n({args.colors} integer-recipe colors)",
             pad=2,
         )
         ax2.axis("off")
@@ -492,7 +491,7 @@ def main(config: dict | None = None):
                        show_components=not args.hide_components,
                        deltaEs=deltaEs,
                        deltaLs=deltaLs,
-                       delta_e_target=recipe_target_delta_e,
+                       delta_e_tolerance=recipe_acceptable_delta_e,
                        swatch_step=0.55, swatch_w=0.55, right_margin=0.10, left_pad=1.10, no_band_bg=True, text_gap=0.03,
                        approx_palette=approx_uint8)
         pdf.savefig(fig, dpi=300); plt.close(fig)
@@ -612,7 +611,7 @@ def main(config: dict | None = None):
                            wrap_width=max(30, int(args.wrap * 0.7)),
                            show_components=not args.hide_components,
                            deltaEs=deltaEs, deltaLs=deltaLs,
-                           delta_e_target=recipe_target_delta_e,
+                           delta_e_tolerance=recipe_acceptable_delta_e,
                            left_pad=1.25, right_margin=0.18, text_gap=0.05,
                            approx_palette=approx_uint8)
             pdf.savefig(fig, dpi=300); plt.close(fig)
@@ -785,7 +784,7 @@ def main(config: dict | None = None):
                             show_components=not args.hide_components,
                             deltaEs=deltaEs,
                             deltaLs=deltaLs,
-                            delta_e_target=recipe_target_delta_e,
+                            delta_e_tolerance=recipe_acceptable_delta_e,
                             left_pad=1.25, right_margin=0.18, text_gap=0.05,
                             approx_palette=approx_uint8
                         )
@@ -889,7 +888,7 @@ def main(config: dict | None = None):
                         show_components=not args.hide_components,
                         deltaEs=deltaEs,
                         deltaLs=deltaLs,
-                        delta_e_target=recipe_target_delta_e,
+                        delta_e_tolerance=recipe_acceptable_delta_e,
                         left_pad=1.25, right_margin=0.18, text_gap=0.05,
                         approx_palette=approx_uint8
                     )
