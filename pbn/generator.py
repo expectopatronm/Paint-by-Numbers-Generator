@@ -351,6 +351,11 @@ def main(config: dict | None = None):
                         "predicted_rgb": [int(x) for x in np.rint(approx_uint8[i]).astype(int).tolist()],
                         "delta_e": float(deltaEs[i]),
                         "delta_l": float(deltaLs[i]),
+                        "delta_e_target_percent": (
+                            100.0 * float(deltaEs[i]) / recipe_target_delta_e
+                            if recipe_target_delta_e > 0 else None
+                        ),
+                        "delta_l_scale_percent": float(deltaLs[i]),
                         "ideal_value_met": abs(float(deltaLs[i])) <= recipe_ideal_delta_l,
                         "value_guardrail_met": abs(float(deltaLs[i])) <= recipe_max_delta_l,
                     }
@@ -487,6 +492,7 @@ def main(config: dict | None = None):
                        show_components=not args.hide_components,
                        deltaEs=deltaEs,
                        deltaLs=deltaLs,
+                       delta_e_target=recipe_target_delta_e,
                        swatch_step=0.55, swatch_w=0.55, right_margin=0.10, left_pad=1.10, no_band_bg=True, text_gap=0.03,
                        approx_palette=approx_uint8)
         pdf.savefig(fig, dpi=300); plt.close(fig)
@@ -606,6 +612,7 @@ def main(config: dict | None = None):
                            wrap_width=max(30, int(args.wrap * 0.7)),
                            show_components=not args.hide_components,
                            deltaEs=deltaEs, deltaLs=deltaLs,
+                           delta_e_target=recipe_target_delta_e,
                            left_pad=1.25, right_margin=0.18, text_gap=0.05,
                            approx_palette=approx_uint8)
             pdf.savefig(fig, dpi=300); plt.close(fig)
@@ -778,6 +785,7 @@ def main(config: dict | None = None):
                             show_components=not args.hide_components,
                             deltaEs=deltaEs,
                             deltaLs=deltaLs,
+                            delta_e_target=recipe_target_delta_e,
                             left_pad=1.25, right_margin=0.18, text_gap=0.05,
                             approx_palette=approx_uint8
                         )
@@ -881,6 +889,7 @@ def main(config: dict | None = None):
                         show_components=not args.hide_components,
                         deltaEs=deltaEs,
                         deltaLs=deltaLs,
+                        delta_e_target=recipe_target_delta_e,
                         left_pad=1.25, right_margin=0.18, text_gap=0.05,
                         approx_palette=approx_uint8
                     )
