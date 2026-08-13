@@ -5,16 +5,16 @@ from __future__ import annotations
 BASE_PALETTE = {
     # "alizarin_crimson": (82, 17, 28),
     # "burnt_sienna": (86, 35, 33),
-    "burnt_umber": (44, 28, 22),
     # "cobalt_blue": (36, 42, 85),
     # "indian_yellow": (219, 125, 21),
-    "indigo": (14, 17, 33),
-    "ivory_black": (15, 18, 22),
     # "olive_green": (73, 88, 37),
+    # "yellow_ochre": (187, 128, 35)
+    # "indigo": (14, 17, 33),
+    "burnt_umber": (44, 28, 22),
+    "ivory_black": (15, 18, 22),
     "paynes_gray": (13, 20, 25),
     "titanium_white": (247, 247, 241),
     "vandyke_brown": (27, 20, 13),
-    "yellow_ochre": (187, 128, 35)
 }
 
 # Dark earths + blacks (burnt_sienna, burnt_umber, ivory_black, paynes_gray, vandyke_brown) at 0.75:
@@ -296,7 +296,7 @@ DEFAULT_CONFIG = {
     #   - The effective threshold is max(min_region_px,
     #     min_region_pct/100 * total_pixels).
     #   - Set both to 0 to disable small-region cleanup.
-    "min_region_px": 25,
+    "min_region_px": 0,
     "min_region_pct": 0.0,
     # ------------------------------------------------------------------
     # 12) CLEAN STENCIL PIPELINE (OUTLINE POST-PROCESSING)
