@@ -283,11 +283,12 @@ smoothing and cleanup. It is intentionally kept separate from the attainable
 recipe color; comparing the recipe color with itself would always report a
 misleading zero.
 
-The PDF color keys report both `Delta E` and signed `Delta L*`. Delta E is the
-overall perceptual color difference. `Delta L* = mixed paint - target`, so a
-negative value means the predicted mix is too dark and a positive value means
-it is too light. The absolute mixed-paint L* is not shown because it is not an
-error measurement.
+The PDF translates both errors into clearly defined percentages while retaining
+raw Delta E. `Delta E=178% goal (0.89)` means the error is 178% of the
+configured `0.50` Delta E target; it does not mean the color is 178% different.
+`Delta L=-1.97% darker` means Delta L* is -1.97 percentage points on the complete
+0-100 L* scale. Positive is lighter and negative is darker. This is deliberately
+not a percentage relative to the target L*, which becomes unstable near black.
 
 The current default method is:
 

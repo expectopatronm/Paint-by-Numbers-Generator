@@ -24,6 +24,7 @@ def draw_color_key(
     show_components=True,
     deltaEs=None,
     deltaLs=None,
+    delta_e_target=None,
     left_pad=None,
     right_margin=None,
     swatch_step=None,
@@ -64,9 +65,15 @@ def draw_color_key(
 
         tweak_str = ""
         if deltaEs is not None:
-            tweak_str += f" • ΔE≈{deltaEs[ci]:.2f}"
+            if delta_e_target is not None and float(delta_e_target) > 0:
+                color_pct = 100.0 * float(deltaEs[ci]) / float(delta_e_target)
+                tweak_str += f" • ΔE={color_pct:.0f}% goal ({deltaEs[ci]:.2f})"
+            else:
+                tweak_str += f" • ΔE≈{deltaEs[ci]:.2f}"
         if deltaLs is not None:
-            tweak_str += f" • ΔL*={deltaLs[ci]:+.2f}"
+            delta_l = float(deltaLs[ci])
+            direction = "lighter" if delta_l > 0 else "darker" if delta_l < 0 else "exact"
+            tweak_str += f" • ΔL={delta_l:+.2f}% {direction}"
         if tweaks.get(ci, ""):
             tweak_str += f" • {tweaks[ci]}"
         text_str = f"{ci + 1}: {recipes[ci]}{tweak_str}"
@@ -90,7 +97,7 @@ def draw_color_key(
     ax.set_ylim(0, len(used_indices))
     ax.invert_yaxis()
     ax.axis("off")
-    t = ax.set_title(title + " (swatch = mixed color)", pad=3)
+    t = ax.set_title(title + " (ΔE %=goal; ΔL %=full L* scale)", pad=3)
     t.set_wrap(True)
 
 # ---------------------------
