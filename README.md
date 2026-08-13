@@ -179,6 +179,13 @@ Recipe candidates and image colours are compared with CIEDE2000 in CIELAB.
 This prevents the generator from first inventing an arbitrary cluster colour
 that the permitted whole-number recipes cannot reproduce.
 
+Recipe-aware clustering minimizes CIEDE2000 so image quantization preserves
+overall perceptual color. Final recipe selection adds a painter-oriented value
+guardrail: among recipes with `|Delta L*| <= 2.0`, it chooses the lowest
+CIEDE2000 Delta E. `|Delta L*| <= 1.0` is the preferred reported value match.
+If no permitted integer recipe meets the guardrail, the closest attainable
+value is used and the miss is reported.
+
 After clustering, the label map is upsampled to full image size and can be smoothed.
 
 ---
@@ -248,9 +255,10 @@ The generator builds a reusable catalogue containing every valid recipe with:
 - no more than 5 parts of any pigment, and
 - only reduced ratios (`2:4` is stored as `1:2`).
 
-Every target color is compared with the complete catalogue, so the result is
-the global best match under these practical whole-part limits. There is no
-random search and repeated runs return the same recipe.
+Every target color is compared with the complete catalogue. The result is the
+lowest overall perceptual color difference that also satisfies the configured
+absolute L* guardrail. There is no random search and repeated runs return the
+same recipe.
 
 Example recipe:
 
@@ -268,6 +276,18 @@ Delta E is the color difference between:
 
 - the target cluster color, and
 - the predicted mixed-paint color.
+
+With the default recipe-aware clustering, the target is the mean Lab color of
+the original-image pixels finally assigned to that numbered region after
+smoothing and cleanup. It is intentionally kept separate from the attainable
+recipe color; comparing the recipe color with itself would always report a
+misleading zero.
+
+The PDF color keys report both `Delta E` and signed `Delta L*`. Delta E is the
+overall perceptual color difference. `Delta L* = mixed paint - target`, so a
+negative value means the predicted mix is too dark and a positive value means
+it is too light. The absolute mixed-paint L* is not shown because it is not an
+error measurement.
 
 The current default method is:
 
@@ -295,9 +315,7 @@ thousands of valid recipes.
 
 ---
 
-## Recipe Cache And Probe Scripts
-
-Full PDF generation can take a long time. Recipe experiments should not require rerunning clustering and PDF rendering.
+## Recipe Cache
 
 The generator now writes a recipe target cache:
 
@@ -313,34 +331,8 @@ The cache stores:
 - chosen recipe,
 - predicted mixed RGB,
 - Delta E,
-- optimizer settings.
-
-After a full run, you can inspect a single color without regenerating the PDF:
-
-```powershell
-.\venv\Scripts\python.exe scripts\probe_color_recipe.py --color 20 --skip-integer
-```
-
-There is also an optimizer comparison script:
-
-```powershell
-.\venv\Scripts\python.exe scripts\experiment_integer_optimizers.py
-```
-
-That script compares:
-
-- the seed recipe,
-- the stochastic integer retry experiment,
-- simulated annealing,
-- genetic algorithm.
-
-The production generator currently uses only:
-
-```text
-integer baseline -> genetic fallback
-```
-
-The other methods remain useful for research and comparison.
+- signed Delta L*, and
+- guardrail status and optimizer settings.
 
 ---
 
@@ -362,7 +354,7 @@ Stage pages: ...
 Per-color pages: ...
 ```
 
-The recipe step is usually the long one, especially when genetic fallback is triggered for hard colors.
+The exhaustive recipe catalogue is built once and reused for every color.
 
 ---
 
@@ -524,24 +516,6 @@ components = 5
 max_parts = 10
 ```
 
-The genetic fallback is separate and only runs when Delta E is above the threshold.
-
-### Change Genetic Fallback Strength
-
-More aggressive:
-
-```python
-genetic_retry_population = 240
-genetic_retry_generations = 220
-```
-
-Faster:
-
-```python
-genetic_retry_population = 100
-genetic_retry_generations = 80
-```
-
 ### Adjust Sketch Strength
 
 ```python
@@ -583,18 +557,17 @@ The generator gives a strong starting point. For important colors, especially pa
 pbn/
   generator.py       Main pipeline and PDF assembly
   config.py          Default configuration
-  mixing.py          Mixbox, integer search, genetic fallback
+  mixing.py          Mixbox and exhaustive constrained integer search
   image_ops.py       Sketch, grid, cleanup, smoothing helpers
   pdf_render.py      Color key and PDF layout helpers
   svg_trace.py       Centerline SVG tracing
 
 scripts/
-  probe_color_recipe.py              Probe one color from cache or target RGB
-  experiment_integer_optimizers.py   Compare optimizer strategies
+  cluster_preview.py                 Generate a quick clustering preview
 
 pics/
-  33.jpg             Current sample source image
-  33_sketch.png      Current sample external sketch
+  100.PNG             Current sample source image
+  100_sketch.png      Current sample external sketch
 
 docs/readme/
   *.png              README images rendered from the generated PDF
@@ -602,8 +575,8 @@ docs/readme/
 outputs/
   recipe_targets.json                Recipe target cache after generation
 
-paint_by_numbers_guide_1.pdf
-  Included sample guide
+paint_by_numbers_guide.pdf
+  Generated guide (ignored by Git)
 ```
 
 ---
@@ -622,5 +595,5 @@ Centerline SVG with grid saved: centerline_output.svg
 Centerline canvas SVG saved: centerline_output_canvas.svg
 ```
 
-On this machine, full generation has typically taken tens of minutes, depending on recipe-search settings and how many colors trigger the genetic fallback.
+On this machine, full generation has typically taken a few minutes depending on image size and PDF page count.
 

@@ -45,6 +45,43 @@ from .svg_trace import _auto_grid_step, run_centerline_trace
 
 DELTA_E_METHOD = "colour_ciede2000"
 
+
+def _assigned_source_targets(
+    rgb: np.ndarray,
+    labels: np.ndarray,
+    fallback_rgb: np.ndarray,
+) -> np.ndarray:
+    """Return the representative source color assigned to each paint label.
+
+    The target for a recipe-aware cluster cannot be its attainable recipe
+    color, because comparing that color with itself always produces Delta E
+    zero. Instead, this computes the mean Lab color of the source pixels that
+    remain assigned to each label after smoothing and region cleanup.
+
+    Args:
+        rgb: Source RGB image used for color clustering.
+        labels: Final two-dimensional paint-label map.
+        fallback_rgb: Color to retain if cleanup removed a label entirely.
+
+    Returns:
+        Representative RGB target for every paint label.
+    """
+    fallback = np.asarray(fallback_rgb, dtype=float)
+    flat_labels = np.asarray(labels, dtype=np.int64).reshape(-1)
+    labs = color_space.rgb8_rows_to_lab(np.asarray(rgb, dtype=np.uint8).reshape(-1, 3))
+    counts = np.bincount(flat_labels, minlength=len(fallback))
+    sums = np.column_stack([
+        np.bincount(flat_labels, weights=labs[:, channel], minlength=len(fallback))
+        for channel in range(3)
+    ])
+
+    targets = fallback.copy()
+    for label in np.flatnonzero(counts):
+        mean_lab = sums[label] / counts[label]
+        targets[label] = np.clip(lab_to_rgb8(mean_lab), 0, 255)
+    return targets
+
+
 # ---------------------------
 # Main (DICT config, no argparse)
 # ---------------------------
@@ -196,7 +233,24 @@ def main(config: dict | None = None):
         min_region_pct=max(0.0, float(args.min_region_pct)),
     )
 
+    used_labels = np.unique(labels_full)
+    if len(used_labels) < len(centroids):
+        remap = np.zeros(len(centroids), dtype=np.uint8)
+        remap[used_labels] = np.arange(len(used_labels), dtype=np.uint8)
+        labels_full = remap[labels_full]
+        centroids = centroids[used_labels]
+        if selected_recipe_indices is not None:
+            selected_recipe_indices = tuple(
+                selected_recipe_indices[int(label)] for label in used_labels
+            )
+        args.colors = len(used_labels)
+        print(f"Removed {len(remap) - args.colors} unused paint colors after cleanup.")
+
     # Build recipes (MIXED palette) — parallelized
+    recipe_targets = centroids
+    if selected_recipe_indices is not None:
+        recipe_targets = _assigned_source_targets(rgb_full, labels_full, centroids)
+
     all_entries, all_recipes, approx_rgbs, deltaEs = [], [], [], []
 
     print(f"[4/6] Resolving exact integer recipes for {len(centroids)} colors...")
@@ -209,12 +263,22 @@ def main(config: dict | None = None):
         )
     if selected_recipe_indices is not None:
         recipe_results = [
-            (list(recipe_catalog.entries[index]), recipe_catalog.rgbs[index].copy(), 0.0)
-            for index in selected_recipe_indices
+            exhaustive_integer_mix_best(
+                target,
+                names,
+                max_delta_l=float(getattr(args, "recipe_max_delta_l", 2.0)),
+                catalog=recipe_catalog,
+            )
+            for target in recipe_targets
         ]
     else:
         recipe_results = [
-            exhaustive_integer_mix_best(col, names, catalog=recipe_catalog)
+            exhaustive_integer_mix_best(
+                col,
+                names,
+                max_delta_l=float(getattr(args, "recipe_max_delta_l", 2.0)),
+                catalog=recipe_catalog,
+            )
             for col in tqdm(centroids.astype(np.float32), total=len(centroids), desc="Recipes", unit="color")
         ]
     for entries, approx_rgb, err in recipe_results:
@@ -224,6 +288,24 @@ def main(config: dict | None = None):
         deltaEs.append(err)
 
     approx_uint8 = np.clip(np.rint(np.array(approx_rgbs)), 0, 255).astype(np.uint8)
+    deltaLs = [
+        Lstar_from_rgb(approx_rgbs[i]) - Lstar_from_rgb(recipe_targets[i])
+        for i in range(len(approx_rgbs))
+    ]
+    recipe_max_delta_l = float(getattr(args, "recipe_max_delta_l", 2.0))
+    recipe_ideal_delta_l = float(getattr(args, "recipe_ideal_delta_l", 1.0))
+    value_misses = [
+        (i + 1, float(delta_l))
+        for i, delta_l in enumerate(deltaLs)
+        if abs(float(delta_l)) > recipe_max_delta_l
+    ]
+    if value_misses:
+        worst_color, worst_delta_l = max(value_misses, key=lambda item: abs(item[1]))
+        print(
+            f"Value guardrail missed for {len(value_misses)}/{len(deltaLs)} colors "
+            f"(limit |dL*|<={recipe_max_delta_l:.2f}; "
+            f"worst #{worst_color} dL*={worst_delta_l:+.3f})."
+        )
     recipe_target_delta_e = float(getattr(args, "recipe_target_delta_e", 0.5))
     recipe_misses = [
         (i + 1, float(err))
@@ -252,14 +334,25 @@ def main(config: dict | None = None):
                 "clustering_method": clustering_method,
                 "recipe_optimizer": "exhaustive_integer",
                 "recipe_target_delta_e": recipe_target_delta_e,
+                "recipe_ideal_delta_l": recipe_ideal_delta_l,
+                "recipe_max_delta_l": recipe_max_delta_l,
+                "recipe_selection": "lowest_delta_e_with_absolute_delta_l_guardrail",
+                "delta_e_target": (
+                    "mean_lab_of_final_assigned_source_pixels"
+                    if selected_recipe_indices is not None
+                    else "unconstrained_cluster_centroid"
+                ),
                 "color_targets": [
                     {
                         "color_number": int(i + 1),
-                        "target_rgb": [int(x) for x in np.rint(centroids[i]).astype(int).tolist()],
+                        "target_rgb": [int(x) for x in np.rint(recipe_targets[i]).astype(int).tolist()],
                         "recipe_entries": [{"pigment": str(n), "parts": int(p)} for n, p in all_entries[i]],
                         "recipe_text": str(all_recipes[i]),
                         "predicted_rgb": [int(x) for x in np.rint(approx_uint8[i]).astype(int).tolist()],
                         "delta_e": float(deltaEs[i]),
+                        "delta_l": float(deltaLs[i]),
+                        "ideal_value_met": abs(float(deltaLs[i])) <= recipe_ideal_delta_l,
+                        "value_guardrail_met": abs(float(deltaLs[i])) <= recipe_max_delta_l,
                     }
                     for i in range(args.colors)
                 ],
@@ -386,13 +479,14 @@ def main(config: dict | None = None):
             pad=2,
         )
         ax2.axis("off")
-        draw_color_key(ax3, centroids, all_recipes, all_entries, BASE_PALETTE,
+        draw_color_key(ax3, recipe_targets, all_recipes, all_entries, BASE_PALETTE,
                        used_indices=list(range(args.colors)),
                        title="Color Key • All Clusters",
                        tweaks=tweaks,
                        wrap_width=int(args.wrap * 1.5),
                        show_components=not args.hide_components,
                        deltaEs=deltaEs,
+                       deltaLs=deltaLs,
                        swatch_step=0.55, swatch_w=0.55, right_margin=0.10, left_pad=1.10, no_band_bg=True, text_gap=0.03,
                        approx_palette=approx_uint8)
         pdf.savefig(fig, dpi=300); plt.close(fig)
@@ -408,6 +502,7 @@ def main(config: dict | None = None):
             max_parts=6,
             max_components=3,
             max_part_per_pigment=max_part_per_pigment,
+            max_delta_l=float(getattr(args, "recipe_max_delta_l", 2.0)),
         )
         imp_rgb = np.clip(np.rint(imp_rgb), 0, 255).astype(np.uint8)
         imp_L = Lstar_from_rgb(imp_rgb)
@@ -504,13 +599,14 @@ def main(config: dict | None = None):
             suffix = " + Grid (outline multiply underlay)" if sketch_factor_rgb is not None else " + Grid"
             axL.imshow(frame_with_grid); axL.set_title(title + suffix, pad=2); axL.axis("off")
 
-            draw_color_key(axR, centroids, all_recipes, all_entries, BASE_PALETTE,
+            draw_color_key(axR, recipe_targets, all_recipes, all_entries, BASE_PALETTE,
                            used_indices=idxs,
                            title=f"Color Key • {title}",
                            tweaks=tweaks,
                            wrap_width=max(30, int(args.wrap * 0.7)),
                            show_components=not args.hide_components,
-                           deltaEs=deltaEs, left_pad=1.25, right_margin=0.18, text_gap=0.05,
+                           deltaEs=deltaEs, deltaLs=deltaLs,
+                           left_pad=1.25, right_margin=0.18, text_gap=0.05,
                            approx_palette=approx_uint8)
             pdf.savefig(fig, dpi=300); plt.close(fig)
 
@@ -674,13 +770,14 @@ def main(config: dict | None = None):
 
                         # Bottom-right: existing color key panel
                         draw_color_key(
-                            axKey, centroids, all_recipes, all_entries, BASE_PALETTE,
+                            axKey, recipe_targets, all_recipes, all_entries, BASE_PALETTE,
                             used_indices=[i],
                             title=f"Color Key • Color #{i + 1} ({role})",
                             tweaks=tweaks,
                             wrap_width=max(30, int(args.wrap * 0.7)),
                             show_components=not args.hide_components,
                             deltaEs=deltaEs,
+                            deltaLs=deltaLs,
                             left_pad=1.25, right_margin=0.18, text_gap=0.05,
                             approx_palette=approx_uint8
                         )
@@ -776,13 +873,14 @@ def main(config: dict | None = None):
 
                     # Bottom-right: what you already had (color key)
                     draw_color_key(
-                        axKey, centroids, all_recipes, all_entries, BASE_PALETTE,
+                        axKey, recipe_targets, all_recipes, all_entries, BASE_PALETTE,
                         used_indices=[i],
                         title=f"Color Key • Color #{i + 1}",
                         tweaks=tweaks,
                         wrap_width=max(30, int(args.wrap * 0.7)),
                         show_components=not args.hide_components,
                         deltaEs=deltaEs,
+                        deltaLs=deltaLs,
                         left_pad=1.25, right_margin=0.18, text_gap=0.05,
                         approx_palette=approx_uint8
                     )

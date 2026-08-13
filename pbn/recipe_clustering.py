@@ -20,7 +20,10 @@ def _distinct_catalog(catalog: IntegerRecipeCatalog) -> tuple[np.ndarray, np.nda
     return catalog.rgbs[indices], indices
 
 
-def _nearest_distinct(target_labs: np.ndarray, catalog_labs: np.ndarray) -> np.ndarray:
+def _nearest_distinct(
+    target_labs: np.ndarray,
+    catalog_labs: np.ndarray,
+) -> np.ndarray:
     """Map initial centres to distinct attainable colours."""
     selected: list[int] = []
     used: set[int] = set()

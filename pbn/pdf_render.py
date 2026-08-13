@@ -7,8 +7,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Rectangle
 
-from .color import Lstar_from_rgb
-
 # ---------------------------
 # Color key drawer
 # ---------------------------
@@ -25,6 +23,7 @@ def draw_color_key(
     wrap_width=55,
     show_components=True,
     deltaEs=None,
+    deltaLs=None,
     left_pad=None,
     right_margin=None,
     swatch_step=None,
@@ -63,10 +62,11 @@ def draw_color_key(
         ax.text(0.5, row_idx + 0.5, f"{ci + 1}", ha="center", va="center", fontsize=8, color="black",
                 bbox=dict(facecolor=(1, 1, 1, 0.45), edgecolor="none", boxstyle="round,pad=0.1"))
 
-        Lstar = Lstar_from_rgb(show_rgb)
-        tweak_str = f" • L*={Lstar:.1f}"
+        tweak_str = ""
         if deltaEs is not None:
             tweak_str += f" • ΔE≈{deltaEs[ci]:.2f}"
+        if deltaLs is not None:
+            tweak_str += f" • ΔL*={deltaLs[ci]:+.2f}"
         if tweaks.get(ci, ""):
             tweak_str += f" • {tweaks[ci]}"
         text_str = f"{ci + 1}: {recipes[ci]}{tweak_str}"
