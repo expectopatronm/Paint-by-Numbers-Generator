@@ -183,9 +183,10 @@ DEFAULT_CONFIG = {
     #     meets it, the closest attainable value is used and reported.
     "recipe_ideal_delta_l": 1.0,
     "recipe_max_delta_l": 2.0,
-    # recipe_target_delta_e:
-    #   - Reporting target for overall recipe color accuracy.
-    "recipe_target_delta_e": 0.5,
+    # recipe_acceptable_delta_e:
+    #   - Reporting tolerance for overall recipe color accuracy.
+    #   - The PDF treats Delta E 3.0 as 100% of the acceptable tolerance.
+    "recipe_acceptable_delta_e": 3.0,
     # delta_e_method:
     #   - "colour_ciede2000" uses the colour-science implementation of
     #     CIEDE2000 for recipe scoring (default).
