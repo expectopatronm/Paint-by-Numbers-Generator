@@ -3,14 +3,14 @@ from __future__ import annotations
 # Base tube pigment palette
 # ---------------------------
 BASE_PALETTE = {
-    "alizarin_crimson": (82, 17, 28),
-    "burnt_sienna": (86, 35, 33),
+    # "alizarin_crimson": (82, 17, 28),
+    # "burnt_sienna": (86, 35, 33),
     "burnt_umber": (44, 28, 22),
-    "cobalt_blue": (36, 42, 85),
-    "indian_yellow": (219, 125, 21),
+    # "cobalt_blue": (36, 42, 85),
+    # "indian_yellow": (219, 125, 21),
     "indigo": (14, 17, 33),
     "ivory_black": (15, 18, 22),
-    "olive_green": (73, 88, 37),
+    # "olive_green": (73, 88, 37),
     "paynes_gray": (13, 20, 25),
     "titanium_white": (247, 247, 241),
     "vandyke_brown": (27, 20, 13),
@@ -176,18 +176,15 @@ DEFAULT_CONFIG = {
     #   - Largest whole-number amount allowed for any single pigment.
     #   - Recipes are reduced, so 2:4 is stored and printed as 1:2.
     "max_part_per_pigment": 5,
-    "recipe_optimizer": "exhaustive_integer",
-    # recipe_hillclimb_starts:
-    #   - Number of seeded/random starts for the multistart hill-climb
-    #     recipe optimizer. Higher values can improve hard colors but
-    #     increase runtime.
-    # recipe_hillclimb_seed:
-    #   - Base random seed for reproducible hill-climb starts.
-    "recipe_hillclimb_starts": 45,
-    "recipe_hillclimb_seed": 0,
+    # recipe_ideal_delta_l / recipe_max_delta_l:
+    #   - Recipes inside the absolute L* guardrail compete on CIEDE2000 Delta E.
+    #   - |Delta L*| <= 1.0 is the preferred value match for reporting.
+    #   - |Delta L*| <= 2.0 is the selection guardrail. If no integer recipe
+    #     meets it, the closest attainable value is used and reported.
+    "recipe_ideal_delta_l": 1.0,
+    "recipe_max_delta_l": 2.0,
     # recipe_target_delta_e:
-    #   - Reporting target for recipe accuracy. The optimizer minimizes
-    #     Delta E directly; this value documents the desired threshold.
+    #   - Reporting target for overall recipe color accuracy.
     "recipe_target_delta_e": 0.5,
     # delta_e_method:
     #   - "colour_ciede2000" uses the colour-science implementation of
@@ -298,7 +295,7 @@ DEFAULT_CONFIG = {
     #   - The effective threshold is max(min_region_px,
     #     min_region_pct/100 * total_pixels).
     #   - Set both to 0 to disable small-region cleanup.
-    "min_region_px": 0,
+    "min_region_px": 25,
     "min_region_pct": 0.0,
     # ------------------------------------------------------------------
     # 12) CLEAN STENCIL PIPELINE (OUTLINE POST-PROCESSING)
