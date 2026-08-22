@@ -39,6 +39,7 @@ from .image_ops import (
 from .imprimatura import _prev_highlight_rgb, choose_imprimatura_target_from_image
 from .integrations import _maybe_upscale_input, rmbg_alpha_matte
 from .mixing import build_integer_recipe_catalog, exhaustive_integer_mix_best, recipe_text
+from .palette_merge import merge_similar_recipes
 from .pdf_render import draw_color_key, new_fig
 from .recipe_clustering import recipe_aware_cluster
 from .svg_trace import _auto_grid_step, run_centerline_trace
@@ -178,6 +179,7 @@ def main(config: dict | None = None):
     recipe_catalog = None
     selected_recipe_indices = None
     names = args.palette
+    requested_colors = int(args.colors)
     max_part_per_pigment = int(getattr(args, "max_part_per_pigment", 5))
 
     if clustering_method == "recipe_aware":
@@ -261,12 +263,13 @@ def main(config: dict | None = None):
             max_components=int(args.components),
             max_part_per_pigment=max_part_per_pigment,
         )
+    recipe_max_delta_l = float(getattr(args, "recipe_max_delta_l", 2.0))
     if selected_recipe_indices is not None:
         recipe_results = [
             exhaustive_integer_mix_best(
                 target,
                 names,
-                max_delta_l=float(getattr(args, "recipe_max_delta_l", 2.0)),
+                max_delta_l=recipe_max_delta_l,
                 catalog=recipe_catalog,
             )
             for target in recipe_targets
@@ -276,7 +279,7 @@ def main(config: dict | None = None):
             exhaustive_integer_mix_best(
                 col,
                 names,
-                max_delta_l=float(getattr(args, "recipe_max_delta_l", 2.0)),
+                max_delta_l=recipe_max_delta_l,
                 catalog=recipe_catalog,
             )
             for col in tqdm(centroids.astype(np.float32), total=len(centroids), desc="Recipes", unit="color")
@@ -287,12 +290,41 @@ def main(config: dict | None = None):
         approx_rgbs.append(np.array(approx_rgb, dtype=float))
         deltaEs.append(err)
 
+    merged_from = tuple((index,) for index in range(len(approx_rgbs)))
+    if bool(getattr(args, "palette_merge", True)):
+        merge_result = merge_similar_recipes(
+            labels_full,
+            recipe_targets,
+            all_entries,
+            np.asarray(approx_rgbs, dtype=float),
+            deltaEs,
+            recipe_catalog,
+            names,
+            max_delta_e=float(getattr(args, "palette_merge_delta_e", 1.5)),
+            max_delta_l=float(getattr(args, "palette_merge_delta_l", 1.0)),
+            recipe_max_delta_l=recipe_max_delta_l,
+            min_colors=int(getattr(args, "palette_merge_min_colors", 1)),
+        )
+        before_merge = len(approx_rgbs)
+        labels_full = merge_result.labels
+        recipe_targets = merge_result.targets
+        all_entries = [list(recipe) for recipe in merge_result.entries]
+        all_recipes = [recipe_text(recipe) for recipe in all_entries]
+        approx_rgbs = [rgb.copy() for rgb in merge_result.rgbs]
+        deltaEs = merge_result.delta_es.tolist()
+        merged_from = merge_result.merged_from
+        args.colors = len(approx_rgbs)
+        print(
+            f"Perceptual recipe merging reduced {before_merge} colors to {args.colors} "
+            f"(dE<={float(args.palette_merge_delta_e):.2f}, "
+            f"|dL*|<={float(args.palette_merge_delta_l):.2f})."
+        )
+
     approx_uint8 = np.clip(np.rint(np.array(approx_rgbs)), 0, 255).astype(np.uint8)
     deltaLs = [
         Lstar_from_rgb(approx_rgbs[i]) - Lstar_from_rgb(recipe_targets[i])
         for i in range(len(approx_rgbs))
     ]
-    recipe_max_delta_l = float(getattr(args, "recipe_max_delta_l", 2.0))
     recipe_ideal_delta_l = float(getattr(args, "recipe_ideal_delta_l", 1.0))
     value_misses = [
         (i + 1, float(delta_l))
@@ -326,6 +358,7 @@ def main(config: dict | None = None):
             os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
             cache_payload = {
                 "input": str(args.input),
+                "maximum_colors": requested_colors,
                 "colors": int(args.colors),
                 "palette": list(args.palette),
                 "max_parts": int(args.max_parts),
@@ -338,6 +371,9 @@ def main(config: dict | None = None):
                 "recipe_ideal_delta_l": recipe_ideal_delta_l,
                 "recipe_max_delta_l": recipe_max_delta_l,
                 "recipe_selection": "lowest_delta_e_with_absolute_delta_l_guardrail",
+                "palette_merge": bool(getattr(args, "palette_merge", True)),
+                "palette_merge_delta_e": float(getattr(args, "palette_merge_delta_e", 1.5)),
+                "palette_merge_delta_l": float(getattr(args, "palette_merge_delta_l", 1.0)),
                 "delta_e_target": (
                     "mean_lab_of_final_assigned_source_pixels"
                     if selected_recipe_indices is not None
@@ -346,6 +382,7 @@ def main(config: dict | None = None):
                 "color_targets": [
                     {
                         "color_number": int(i + 1),
+                        "merged_from_initial_colors": [int(index + 1) for index in merged_from[i]],
                         "target_rgb": [int(x) for x in np.rint(recipe_targets[i]).astype(int).tolist()],
                         "recipe_entries": [{"pigment": str(n), "parts": int(p)} for n, p in all_entries[i]],
                         "recipe_text": str(all_recipes[i]),

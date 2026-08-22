@@ -80,9 +80,9 @@ DEFAULT_CONFIG = {
     #     used: outline page, frame underlay, per-color underlay, and
     #     centerline SVG tracing.
     #   - Use black/dark lines on a white/light background.
-    "input": "pics/100.PNG",
+    "input": "pics/101.png",
     "pdf": "paint_by_numbers_guide.pdf",
-    "external_sketch": "pics/100_sketch.png",
+    "external_sketch": "pics/101_sketch.png",
     # recipe_cache:
     #   - JSON cache of cluster target colors and recipe results.
     #   - Written after recipe generation so optimizer experiments can
@@ -139,6 +139,20 @@ DEFAULT_CONFIG = {
     "clustering_method": "recipe_aware",
     "recipe_clustering_iterations": 8,
     "recipe_clustering_shortlist": 384,
+    # palette_merge:
+    #   - Treats colors as an upper bound. After integer recipes are resolved,
+    #     perceptually redundant predicted mixtures are merged automatically.
+    #   - Complete-link CIEDE2000 prevents similarity chains from collapsing
+    #     colors whose endpoints are visibly different.
+    # palette_merge_delta_e / palette_merge_delta_l:
+    #   - Every original predicted mixture in a merged group must remain within
+    #     both limits of the recalculated combined integer recipe.
+    # palette_merge_min_colors:
+    #   - Optional lower bound; normally leave at 1 and let the thresholds decide.
+    "palette_merge": True,
+    "palette_merge_delta_e": 1.5,
+    "palette_merge_delta_l": 1.0,
+    "palette_merge_min_colors": 1,
     # mrf_smoothing:
     #   - If True, apply Potts/MRF smoothing after clustering and label
     #     upsampling, before tiny-region cleanup and PDF rendering.
