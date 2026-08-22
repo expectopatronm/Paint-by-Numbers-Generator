@@ -32,7 +32,6 @@ from .image_ops import (
     group_classic_exclusive,
     group_value5_exclusive,
     load_external_sketch_gray,
-    original_edge_sketch_with_grid,
     potts_smooth_labels,
     render_image_sketch_gray,
 )
@@ -42,7 +41,7 @@ from .mixing import build_integer_recipe_catalog, exhaustive_integer_mix_best, r
 from .palette_merge import merge_similar_recipes
 from .pdf_render import draw_color_key, new_fig
 from .recipe_clustering import recipe_aware_cluster
-from .svg_trace import _auto_grid_step, run_centerline_trace
+from .svg_trace import _auto_grid_step, centerline_gray_from_outline, run_centerline_trace
 
 DELTA_E_METHOD = "colour_ciede2000"
 
@@ -496,6 +495,10 @@ def main(config: dict | None = None):
         outline_rgb = _adjust_sharpness_rgb(outline_rgb, s_factor)
         outline_gray = cv2.cvtColor(outline_rgb, cv2.COLOR_RGB2GRAY)
 
+    trace_source_gray = outline_gray
+    if trace_source_gray is not None:
+        outline_gray = centerline_gray_from_outline(trace_source_gray, args)
+
     if outline_gray is not None:
         a = float(np.clip(args.sketch_alpha, 0.0, 1.0))
         sketch_norm = np.clip(outline_gray.astype(np.float32) / 255.0, 0.0, 1.0)
@@ -581,19 +584,18 @@ def main(config: dict | None = None):
             pdf.savefig(fig, dpi=300);
             plt.close(fig)
 
-        # Page 3 (Outline page uses the same image as the underlay)
+        # Page 3 (Outline page uses the same centerline output as the underlay)
         if outline_gray is not None:
             fig = new_fig(A4_LANDSCAPE);
             ax = fig.add_subplot(111)
 
-            # If the clean-stencil pipeline was applied, outline_gray already reflects it.
+            # Show the generated centerline sketch that is used on all PDF underlays.
             if args.apply_clean_stencil:
-                # Show the post-processed (clean) stencil with the grid
                 ref_rgb = cv2.cvtColor(outline_gray, cv2.COLOR_GRAY2RGB)
                 ref_with_grid = add_grid_to_rgb(ref_rgb, grid_step=args.grid_step, grid_color=200)
                 mode_tag = "external" if uses_external_sketch else "image"
                 ax.imshow(ref_with_grid)
-                ax.set_title(f"Clean Stencil Outline + Grid ({mode_tag}) (step={args.grid_step}px)", pad=2)
+                ax.set_title(f"Centerline Sketch + Grid ({mode_tag}) (step={args.grid_step}px)", pad=2)
                 ax.axis("off")
                 pdf.savefig(fig, dpi=300);
                 plt.close(fig)
@@ -605,20 +607,15 @@ def main(config: dict | None = None):
                     ref_rgb = cv2.cvtColor(outline_gray, cv2.COLOR_GRAY2RGB)
                     ref_with_grid = add_grid_to_rgb(ref_rgb, grid_step=args.grid_step, grid_color=200)
                     ax.imshow(ref_with_grid)
-                    ax.set_title(f"External Sketch + Grid (step={args.grid_step}px)", pad=2)
+                    ax.set_title(f"Centerline Sketch + Grid (step={args.grid_step}px)", pad=2)
                     ax.axis("off")
                     pdf.savefig(fig, dpi=300);
                     plt.close(fig)
                 else:
-                    legacy_page = original_edge_sketch_with_grid(
-                        img_outline,
-                        grid_step=args.grid_step,
-                        grid_color=200,
-                        canny_high_pct=float(args.edge_percentile),
-                    )
-
-                    ax.imshow(legacy_page, cmap='gray')
-                    ax.set_title(f"Original Edge Sketch + Grid (step={args.grid_step}px)", pad=2)
+                    ref_rgb = cv2.cvtColor(outline_gray, cv2.COLOR_GRAY2RGB)
+                    ref_with_grid = add_grid_to_rgb(ref_rgb, grid_step=args.grid_step, grid_color=200)
+                    ax.imshow(ref_with_grid, cmap='gray')
+                    ax.set_title(f"Centerline Sketch + Grid (step={args.grid_step}px)", pad=2)
                     ax.axis("off")
                     pdf.savefig(fig, dpi=300);
                     plt.close(fig)
@@ -953,7 +950,7 @@ def main(config: dict | None = None):
     # --------------------------------------------------
     if args.export_centerline_svg:
         # Attach stencil to args so the helper can access it
-        args.outline_gray = locals().get("outline_gray", None)
+        args.outline_gray = locals().get("trace_source_gray", None)
         run_centerline_trace(args)
 
     # <<< end timer + print
