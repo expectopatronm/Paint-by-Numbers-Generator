@@ -298,6 +298,26 @@ The current default method is:
 delta_e_method = "colour_ciede2000"
 ```
 
+### Automatic palette reduction
+
+`colors` is a maximum, not a required final count. After clustering, smoothing,
+region cleanup, and integer-recipe resolution, the generator automatically
+merges predicted paint mixtures that are perceptually redundant. The defaults
+require every color in a merged group to remain within both:
+
+```python
+palette_merge_delta_e = 1.5  # CIEDE2000 complete-link threshold
+palette_merge_delta_l = 1.0  # maximum absolute L* separation
+```
+
+The combined source pixels receive a newly optimized integer recipe. The merge
+is accepted only if that recipe remains within both limits of every original
+predicted mixture. This complete-link validation prevents a chain of individually
+similar colors from joining when the colors at the ends are visibly different.
+It works identically for grayscale and full-color images. Set `palette_merge =
+False` to require the old fixed count, or adjust the thresholds when a simpler
+or more conservative palette is preferred.
+
 Lower is better. In practical terms:
 
 - `Delta E <= 1.0` (up to 33% tolerance): excellent digital match.
