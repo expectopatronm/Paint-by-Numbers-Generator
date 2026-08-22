@@ -13,6 +13,38 @@ from skimage.morphology import skeletonize
 # ==============================================================
 # Centerline tracing (convert stencil to single-line SVG)
 # ==============================================================
+def centerline_gray_from_outline(gray: np.ndarray, args) -> np.ndarray:
+    """Return a white-background raster matching the centerline SVG paths.
+
+    Args:
+        gray: Grayscale stencil/outline image to trace.
+        args: Generator settings with centerline thresholding options.
+
+    Returns:
+        Grayscale uint8 image with black centerlines on white.
+    """
+    skel = _centerline_skeleton(gray, args)
+    centerline_gray = np.full(skel.shape, 255, dtype=np.uint8)
+    centerline_gray[skel > 0] = 0
+    return centerline_gray
+
+
+def _centerline_skeleton(gray: np.ndarray, args) -> np.ndarray:
+    img = cv2.GaussianBlur(gray, (args.centerline_blur, args.centerline_blur), 0) if args.centerline_blur > 0 else gray
+
+    if args.centerline_otsu:
+        _, bw = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    else:
+        t = args.centerline_threshold if args.centerline_threshold is not None else 128
+        _, bw = cv2.threshold(img, int(t), 255, cv2.THRESH_BINARY_INV)
+
+    if args.centerline_dilate > 0:
+        kernel = np.ones((2, 2), np.uint8)
+        bw = cv2.dilate(bw, kernel, iterations=args.centerline_dilate)
+
+    return skeletonize((bw > 0).astype(np.uint8)).astype(np.uint8)
+
+
 def _gray_int_to_hex(c: int) -> str:
     """200 -> '#C8C8C8' etc."""
     c = int(np.clip(c, 0, 255))
@@ -62,22 +94,7 @@ def run_centerline_trace(args):
         return
 
     gray = args.outline_gray
-    img = cv2.GaussianBlur(gray, (args.centerline_blur, args.centerline_blur), 0) if args.centerline_blur > 0 else gray
-
-    # Threshold
-    if args.centerline_otsu:
-        _, bw = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    else:
-        t = args.centerline_threshold if args.centerline_threshold is not None else 128
-        _, bw = cv2.threshold(img, int(t), 255, cv2.THRESH_BINARY_INV)
-
-    # Dilation (optional) to connect gaps
-    if args.centerline_dilate > 0:
-        kernel = np.ones((2, 2), np.uint8)
-        bw = cv2.dilate(bw, kernel, iterations=args.centerline_dilate)
-
-    # Skeletonize to centerlines
-    skel = skeletonize((bw > 0).astype(np.uint8)).astype(np.uint8)
+    skel = _centerline_skeleton(gray, args)
 
     # Extract contours as polylines
     contours = measure.find_contours(skel, 0.5)
