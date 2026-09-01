@@ -9,7 +9,7 @@ BASE_PALETTE = {
     # "indian_yellow": (219, 125, 21),
     # "olive_green": (73, 88, 37),
     # "yellow_ochre": (187, 128, 35)
-    # "indigo": (14, 17, 33),
+    "indigo": (14, 17, 33),
     "burnt_umber": (44, 28, 22),
     "ivory_black": (15, 18, 22),
     "paynes_gray": (13, 20, 25),
@@ -98,14 +98,17 @@ DEFAULT_CONFIG = {
     # canvas_long_margin_mm:
     #   - Margin applied on BOTH ends of the LONGEST side of the canvas
     #     when fitting the grid + centerlines.
-    #   - The short side is fitted edge-to-edge; only the long side gets
-    #     this margin.
+    # canvas_short_margin_mm:
+    #   - Margin applied on BOTH ends of the SHORTEST side of the canvas.
+    #   - Useful when the physical canvas is wider than the plotter's safe
+    #     travel after the driver auto-rotates portrait pages.
     # canvas_rotation_deg:
     #   - Rotation applied when placing the pixel artwork onto the canvas
     #     for the centerline SVG.
     #   - Supported values: 0 or 90 degrees (others are clamped to 0).
-    "canvas_dimensions_mm": (240, 300),
+    "canvas_dimensions_mm": (300, 400),
     "canvas_long_margin_mm": 5.0,
+    "canvas_short_margin_mm": 5.0,
     "canvas_rotation_deg": 0,
     # ------------------------------------------------------------------
     # 4) GLOBAL GRID SETTINGS (USED ON PDF PAGES & SVG GRID)
@@ -134,7 +137,7 @@ DEFAULT_CONFIG = {
     #     recipes. This is the default and guarantees every map colour has a
     #     practical recipe.
     #   - "lab_kmeans" retains the previous unconstrained LAB K-Means mode.
-    "colors": 20,
+    "colors": 30,
     "resize": None,  # e.g. (W, H)
     "clustering_method": "recipe_aware",
     "recipe_clustering_iterations": 8,
