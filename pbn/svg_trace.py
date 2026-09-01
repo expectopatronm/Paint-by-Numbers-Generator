@@ -161,9 +161,11 @@ def run_centerline_trace(args):
     if rot not in (0, 90):
         rot = 0  # clamp to safe values
 
-    # --- Margin on the longest side of the CANVAS (both ends)
+    # --- Margins on the CANVAS (both ends of each axis)
     long_margin = float(getattr(args, "canvas_long_margin_mm", 5.0))
     long_margin = max(0.0, long_margin)
+    short_margin = float(getattr(args, "canvas_short_margin_mm", 0.0))
+    short_margin = max(0.0, short_margin)
     width_is_long = Wmm >= Hmm
 
     # Artwork size in pixels BEFORE rotation: (w × h)
@@ -171,16 +173,17 @@ def run_centerline_trace(args):
     W_art_px = w if rot == 0 else h
     H_art_px = h if rot == 0 else w
 
-    # Available drawing area in mm (apply margin only to the longest canvas side)
+    # Available drawing area in mm. Keeping a short-side margin prevents the
+    # driver from clipping a 300 mm-wide portrait canvas after auto-rotation.
     if width_is_long:
         avail_W = max(0.0, Wmm - 2.0 * long_margin)
-        avail_H = Hmm
+        avail_H = max(0.0, Hmm - 2.0 * short_margin)
         offset_x_mm = long_margin
-        offset_y_mm = 0.0
+        offset_y_mm = short_margin
     else:
-        avail_W = Wmm
+        avail_W = max(0.0, Wmm - 2.0 * short_margin)
         avail_H = max(0.0, Hmm - 2.0 * long_margin)
-        offset_x_mm = 0.0
+        offset_x_mm = short_margin
         offset_y_mm = long_margin
 
     # Uniform scale to fit the (possibly rotated) artwork into available area

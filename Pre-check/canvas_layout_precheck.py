@@ -34,6 +34,7 @@ class Placement:
     top_margin_mm: float
     bottom_margin_mm: float
     configured_long_margin_mm: float
+    configured_short_margin_mm: float
 
 
 def fmt_mm(value: float) -> str:
@@ -64,22 +65,22 @@ def compute_placement(image_size: tuple[int, int], cfg: dict) -> Placement:
         rotation_deg = 0
 
     long_margin_mm = max(0.0, float(cfg.get("canvas_long_margin_mm", 5.0)))
+    short_margin_mm = max(0.0, float(cfg.get("canvas_short_margin_mm", 0.0)))
     width_is_long = canvas_w_mm >= canvas_h_mm
 
     art_w_px = image_w_px if rotation_deg == 0 else image_h_px
     art_h_px = image_h_px if rotation_deg == 0 else image_w_px
 
-    # Keep this in lockstep with pbn.svg_trace.run_centerline_trace:
-    # only the canvas's longest side gets the configured margin before fitting.
+    # Keep this in lockstep with pbn.svg_trace.run_centerline_trace.
     if width_is_long:
         available_w_mm = max(0.0, canvas_w_mm - 2.0 * long_margin_mm)
-        available_h_mm = canvas_h_mm
+        available_h_mm = max(0.0, canvas_h_mm - 2.0 * short_margin_mm)
         offset_x_mm = long_margin_mm
-        offset_y_mm = 0.0
+        offset_y_mm = short_margin_mm
     else:
-        available_w_mm = canvas_w_mm
+        available_w_mm = max(0.0, canvas_w_mm - 2.0 * short_margin_mm)
         available_h_mm = max(0.0, canvas_h_mm - 2.0 * long_margin_mm)
-        offset_x_mm = 0.0
+        offset_x_mm = short_margin_mm
         offset_y_mm = long_margin_mm
 
     scale = min(
@@ -108,6 +109,7 @@ def compute_placement(image_size: tuple[int, int], cfg: dict) -> Placement:
         top_margin_mm=y_mm,
         bottom_margin_mm=canvas_h_mm - y_mm - used_h_mm,
         configured_long_margin_mm=long_margin_mm,
+        configured_short_margin_mm=short_margin_mm,
     )
 
 
@@ -291,8 +293,8 @@ def render_preview(
         "",
         "Config rule",
         f"Long-side margin: {fmt_mm(placement.configured_long_margin_mm)}",
-        "Only the longest canvas side receives",
-        "this configured margin before fitting.",
+        f"Short-side margin: {fmt_mm(placement.configured_short_margin_mm)}",
+        "Both margins are applied before fitting.",
     ]
     y = info_y
     for index, line in enumerate(lines):
@@ -319,6 +321,7 @@ def write_summary(path: Path, image_path: Path, placement: Placement) -> None:
             f"Placed artwork: {fmt_mm(placement.w_mm)} x {fmt_mm(placement.h_mm)}",
             f"Scale: {placement.scale_mm_per_px:.6f} mm/px",
             f"Configured long-side margin: {fmt_mm(placement.configured_long_margin_mm)}",
+            f"Configured short-side margin: {fmt_mm(placement.configured_short_margin_mm)}",
             f"Actual left margin: {fmt_mm(placement.left_margin_mm)}",
             f"Actual right margin: {fmt_mm(placement.right_margin_mm)}",
             f"Actual top margin: {fmt_mm(placement.top_margin_mm)}",
