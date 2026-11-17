@@ -76,6 +76,31 @@ def _latest_image_in_tree(root_dir: str, *, after_ts: float) -> str | None:
     return candidates[0][1]
 
 
+def _resize_to_min_long_side(input_path: str, min_long_side: int) -> str:
+    """Resize an image to a minimum long side while preserving its aspect ratio.
+
+    Args:
+        input_path: Image to resize.
+        min_long_side: Required size of the longest edge in pixels.
+
+    Returns:
+        The original path when already large enough, otherwise a new PNG path.
+    """
+    with Image.open(input_path) as image:
+        image = ImageOps.exif_transpose(image)
+        longest = max(image.size)
+        if longest >= min_long_side:
+            return input_path
+
+        scale = min_long_side / longest
+        size = tuple(max(1, int(round(dimension * scale))) for dimension in image.size)
+        output_path = f"{os.path.splitext(input_path)[0]}.{min_long_side}px.png"
+        image.resize(size, Image.Resampling.LANCZOS).save(output_path)
+
+    print(f"Final resize to configured threshold: {size[0]}x{size[1]} -> {output_path}")
+    return output_path
+
+
 def _maybe_upscale_with_supir(input_path: str,
                               *,
                               enable: bool,
@@ -142,8 +167,9 @@ def _maybe_upscale_with_supir(input_path: str,
         shutil.copy2(input_path, staged_input)
 
         env = os.environ.copy()
-        env.setdefault("PYTHONPATH", repo_dir)
-        env.setdefault("SUPIR_MODEL_DIR", model_dir)
+        current_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = repo_dir + (os.pathsep + current_pythonpath if current_pythonpath else "")
+        env["SUPIR_MODEL_DIR"] = model_dir
 
         started = time.time()
         cmd = [
@@ -213,6 +239,14 @@ def _maybe_upscale_input(input_path: str, args) -> str:
     else:
         scale = int(upscale_cfg)
 
+    max_scale = max(1, int(getattr(args, "supir_max_upscale", scale)))
+    if scale > max_scale:
+        print(
+            f"SUPIR scale capped at {max_scale}x for GPU memory safety "
+            f"(threshold calculation requested {scale}x)."
+        )
+        scale = max_scale
+
     prioritizing = str(getattr(args, "supir_prioritizing", "Quality")).lower()
     texture = float(getattr(args, "supir_texture_richness", 1.0))
     creativity = float(getattr(args, "supir_creativity", 0.0))
@@ -260,5 +294,7 @@ def _maybe_upscale_input(input_path: str, args) -> str:
     )
     if result == input_path and longest < ok_min:
         raise RuntimeError("SUPIR did not produce an upscaled image; no original-image fallback is allowed.")
+    if bool(getattr(args, "supir_finish_to_threshold", True)):
+        result = _resize_to_min_long_side(result, ok_min)
     return result
 

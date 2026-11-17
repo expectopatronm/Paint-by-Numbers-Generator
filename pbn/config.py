@@ -80,9 +80,9 @@ DEFAULT_CONFIG = {
     #     used: outline page, frame underlay, per-color underlay, and
     #     centerline SVG tracing.
     #   - Use black/dark lines on a white/light background.
-    "input": "pics/101.png",
+    "input": "pics/102.png",
     "pdf": "paint_by_numbers_guide.pdf",
-    "external_sketch": "pics/101_sketch.png",
+    "external_sketch": "pics/102_sketch.png",
     # recipe_cache:
     #   - JSON cache of cluster target colors and recipe results.
     #   - Written after recipe generation so optimizer experiments can
@@ -152,7 +152,7 @@ DEFAULT_CONFIG = {
     #     both limits of the recalculated combined integer recipe.
     # palette_merge_min_colors:
     #   - Optional lower bound; normally leave at 1 and let the thresholds decide.
-    "palette_merge": True,
+    "palette_merge": False,
     "palette_merge_delta_e": 1.5,
     "palette_merge_delta_l": 1.0,
     "palette_merge_min_colors": 1,
@@ -393,7 +393,7 @@ DEFAULT_CONFIG = {
     #   - If longest_side >= this value, no upscaling is performed.
     #   - If longest_side < this value, SUPIR chooses the smallest
     #     supir_upscale_choices factor that reaches the threshold.
-    "enable_upscale": False,
+    "enable_upscale": True,
     "upscale_ok_min_long": 3000,
     "supir_repo_dir": "SUPIR",
     "supir_python": "venv/Scripts/python.exe",
@@ -407,6 +407,10 @@ DEFAULT_CONFIG = {
     "supir_sign": "Q",  # {"Q", "F"}; Q = general quality, F = lighter degradation fidelity
     "supir_upscale": "auto",
     "supir_upscale_choices": (1, 2, 3, 4),
+    # Cap the AI restoration pass to fit a 16 GB GPU. If this produces an
+    # image below upscale_ok_min_long, a final Lanczos resize reaches it.
+    "supir_max_upscale": 2,
+    "supir_finish_to_threshold": True,
     "supir_min_size": 1024,
     "supir_edm_steps": 50,
     "supir_s_noise": 1.02,
@@ -419,7 +423,7 @@ DEFAULT_CONFIG = {
     "supir_ae_dtype": "bf16",
     "supir_diff_dtype": "fp16",
     "supir_use_tile_vae": True,
-    "supir_loading_half_params": False,
+    "supir_loading_half_params": True,
     "supir_extra_args": [],
     # ------------------------------------------------------------------
     # 15) PRE-BRIGHTENING (BEFORE CLUSTERING / COLORING)

@@ -8,6 +8,40 @@ from omegaconf import OmegaConf
 from sgm.util import instantiate_from_config
 
 
+def _resolve_checkpoint_path(config_path, configured_path):
+    """Resolve a SUPIR checkpoint from config or ``SUPIR_MODEL_DIR``.
+
+    Args:
+        config_path: Path to the SUPIR YAML configuration file.
+        configured_path: Checkpoint path stored in the YAML file.
+
+    Returns:
+        An existing absolute checkpoint path, or ``None`` when unset.
+
+    Raises:
+        FileNotFoundError: If none of the supported locations exists.
+    """
+    if configured_path is None:
+        return None
+
+    configured_path = str(configured_path)
+    candidates = []
+    model_dir = os.environ.get("SUPIR_MODEL_DIR")
+    if model_dir:
+        candidates.append(os.path.join(model_dir, os.path.basename(configured_path)))
+    candidates.append(configured_path)
+    if not os.path.isabs(configured_path):
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(config_path)), configured_path))
+
+    for candidate in candidates:
+        resolved = os.path.abspath(candidate)
+        if os.path.isfile(resolved):
+            return resolved
+
+    checked = "\n  - ".join(os.path.abspath(path) for path in candidates)
+    raise FileNotFoundError(f"SUPIR checkpoint not found. Checked:\n  - {checked}")
+
+
 def get_state_dict(d):
     return d.get('state_dict', d)
 
@@ -35,16 +69,19 @@ def create_SUPIR_model(config_path, SUPIR_sign=None, load_default_setting=False)
     config = OmegaConf.load(config_path)
     model = instantiate_from_config(config.model).cpu()
     print(f'Loaded model config from [{config_path}]')
-    if config.SDXL_CKPT is not None:
-        model.load_state_dict(load_state_dict(config.SDXL_CKPT), strict=False)
-    if config.SUPIR_CKPT is not None:
-        model.load_state_dict(load_state_dict(config.SUPIR_CKPT), strict=False)
+    sdxl_ckpt = _resolve_checkpoint_path(config_path, config.SDXL_CKPT)
+    supir_ckpt = _resolve_checkpoint_path(config_path, config.SUPIR_CKPT)
+    if sdxl_ckpt is not None:
+        model.load_state_dict(load_state_dict(sdxl_ckpt), strict=False)
+    if supir_ckpt is not None:
+        model.load_state_dict(load_state_dict(supir_ckpt), strict=False)
     if SUPIR_sign is not None:
         assert SUPIR_sign in ['F', 'Q']
         if SUPIR_sign == 'F':
-            model.load_state_dict(load_state_dict(config.SUPIR_CKPT_F), strict=False)
+            checkpoint = _resolve_checkpoint_path(config_path, config.SUPIR_CKPT_F)
         elif SUPIR_sign == 'Q':
-            model.load_state_dict(load_state_dict(config.SUPIR_CKPT_Q), strict=False)
+            checkpoint = _resolve_checkpoint_path(config_path, config.SUPIR_CKPT_Q)
+        model.load_state_dict(load_state_dict(checkpoint), strict=False)
     if load_default_setting:
         default_setting = config.default_setting
         return model, default_setting
@@ -52,8 +89,8 @@ def create_SUPIR_model(config_path, SUPIR_sign=None, load_default_setting=False)
 
 def load_QF_ckpt(config_path):
     config = OmegaConf.load(config_path)
-    ckpt_F = torch.load(config.SUPIR_CKPT_F, map_location='cpu')
-    ckpt_Q = torch.load(config.SUPIR_CKPT_Q, map_location='cpu')
+    ckpt_F = torch.load(_resolve_checkpoint_path(config_path, config.SUPIR_CKPT_F), map_location='cpu')
+    ckpt_Q = torch.load(_resolve_checkpoint_path(config_path, config.SUPIR_CKPT_Q), map_location='cpu')
     return ckpt_Q, ckpt_F
 
 

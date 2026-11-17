@@ -52,7 +52,9 @@ args = parser.parse_args()
 print(args)
 
 # load SUPIR
-model = create_SUPIR_model('options/SUPIR_v0.yaml', SUPIR_sign=args.SUPIR_sign)
+script_dir = os.path.dirname(os.path.abspath(__file__))
+config_path = os.path.join(script_dir, 'options', 'SUPIR_v0.yaml')
+model = create_SUPIR_model(config_path, SUPIR_sign=args.SUPIR_sign)
 if args.loading_half_params:
     model = model.half()
 if args.use_tile_vae:
