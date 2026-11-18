@@ -75,6 +75,45 @@ def _save_svg_atomic(dwg, output_path: str) -> str:
     return out
 
 
+def _add_svg_grid(container, drawing, width, height, step, color):
+    """Add a square grid with alternating cell diagonals to an SVG.
+
+    Args:
+        container: SVG drawing or group that receives the lines.
+        drawing: SVG drawing used to construct line elements.
+        width: Grid width in drawing units.
+        height: Grid height in drawing units.
+        step: Square-grid spacing in drawing units.
+        color: SVG stroke color.
+    """
+    if step <= 0:
+        return
+
+    for x in range(0, width + 1, step):
+        container.add(drawing.line(
+            start=(x, 0), end=(x, height), stroke=color,
+            stroke_width=0.5, opacity=0.7, class_="grid-square",
+        ))
+    for y in range(0, height + 1, step):
+        container.add(drawing.line(
+            start=(0, y), end=(width, y), stroke=color,
+            stroke_width=0.5, opacity=0.7, class_="grid-square",
+        ))
+
+    for row, y0 in enumerate(range(0, height - step + 1, step)):
+        for col, x0 in enumerate(range(0, width - step + 1, step)):
+            x1, y1 = x0 + step, y0 + step
+            start, end = (
+                ((x0, y0), (x1, y1))
+                if (row + col) % 2 == 0
+                else ((x1, y0), (x0, y1))
+            )
+            container.add(drawing.line(
+                start=start, end=end, stroke=color, stroke_width=0.5,
+                opacity=0.45, class_="grid-diagonal",
+            ))
+
+
 def run_centerline_trace(args):
     """
     Generate a single-stroke centerline SVG from the final clean stencil outline,
@@ -113,18 +152,7 @@ def run_centerline_trace(args):
     grid_step = int(getattr(args, "grid_step", 250))
     grid_gray = int(getattr(args, "grid_color", 200))
     grid_hex = _gray_int_to_hex(grid_gray)
-
-    if grid_step > 0:
-        # Vertical lines
-        x = 0
-        while x <= w:
-            dwg.add(dwg.line(start=(x, 0), end=(x, h), stroke=grid_hex, stroke_width=0.5, opacity=0.7))
-            x += grid_step
-        # Horizontal lines
-        y = 0
-        while y <= h:
-            dwg.add(dwg.line(start=(0, y), end=(w, y), stroke=grid_hex, stroke_width=0.5, opacity=0.7))
-            y += grid_step
+    _add_svg_grid(dwg, dwg, w, h, grid_step, grid_hex)
 
     # ---------------------------
     # Add CENTERLINES
@@ -215,16 +243,7 @@ def run_centerline_trace(args):
     grid_step_px = int(getattr(args, "grid_step", 250))
     grid_gray = int(getattr(args, "grid_color", 200))
     grid_hex = _gray_int_to_hex(grid_gray)
-
-    if grid_step_px > 0:
-        x = 0
-        while x <= w:
-            root.add(dwg_mm.line(start=(x, 0), end=(x, h), stroke=grid_hex, stroke_width=0.5, opacity=0.7))
-            x += grid_step_px
-        y = 0
-        while y <= h:
-            root.add(dwg_mm.line(start=(0, y), end=(w, y), stroke=grid_hex, stroke_width=0.5, opacity=0.7))
-            y += grid_step_px
+    _add_svg_grid(root, dwg_mm, w, h, grid_step_px, grid_hex)
 
     # ---- centerlines (pixel coords) go into the same group so they share transforms
     for cnt in contours:
