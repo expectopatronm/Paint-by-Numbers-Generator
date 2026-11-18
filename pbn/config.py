@@ -152,7 +152,7 @@ DEFAULT_CONFIG = {
     #     both limits of the recalculated combined integer recipe.
     # palette_merge_min_colors:
     #   - Optional lower bound; normally leave at 1 and let the thresholds decide.
-    "palette_merge": False,
+    "palette_merge": True,
     "palette_merge_delta_e": 1.5,
     "palette_merge_delta_l": 1.0,
     "palette_merge_min_colors": 1,
