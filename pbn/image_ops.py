@@ -404,7 +404,12 @@ def render_image_sketch_gray(bgr: np.ndarray, args=None, **kwargs) -> np.ndarray
     return pencil_readable_norm(bgr, canny_high_pct=edge_pct, **kwargs)
 
 
-def original_edge_sketch_with_grid(img_pil: Image.Image, grid_step=80, grid_color=200, **pencil_kwargs) -> Image.Image:
+def original_edge_sketch_with_grid(
+    img_pil: Image.Image,
+    grid_step=80,
+    grid_color=200,
+    **pencil_kwargs,
+) -> Image.Image:
     """
     Legacy helper: produce the OLD pencil sketch and draw a crisp grid on top.
     Returns a PIL L-mode image for the “Original Edge Sketch + Grid” page.
@@ -440,14 +445,35 @@ def load_external_sketch_gray(sketch_path: str, size: tuple[int, int]) -> np.nda
             im = im.resize(size, resample=Image.BILINEAR)
         return np.array(im, dtype=np.uint8)
 
-def add_grid_to_rgb(arr: np.ndarray, grid_step=80, grid_color=200) -> np.ndarray:
-    """Overlay a grid onto an RGB uint8 image array, non-destructively."""
+def add_grid_to_rgb(
+    arr: np.ndarray,
+    grid_step=80,
+    grid_color=200,
+) -> np.ndarray:
+    """Overlay a square grid with alternating cell diagonals on an RGB image.
+
+    Args:
+        arr: Source RGB uint8 image.
+        grid_step: Distance between horizontal and vertical grid lines.
+        grid_color: Grayscale value used for every guide line.
+    Returns:
+        A copy of the image with the transfer grid applied.
+    """
     out = arr.copy()
     if out.ndim != 3 or out.shape[2] != 3:
         raise ValueError("add_grid_to_rgb expects an HxWx3 RGB array.")
     if grid_step and grid_step > 0:
         out[:, ::grid_step, :] = grid_color
         out[::grid_step, :, :] = grid_color
+        height, width = out.shape[:2]
+        color = (int(grid_color),) * 3
+        for row, y0 in enumerate(range(0, height - grid_step + 1, grid_step)):
+            for col, x0 in enumerate(range(0, width - grid_step + 1, grid_step)):
+                x1, y1 = x0 + grid_step, y0 + grid_step
+                if (row + col) % 2 == 0:
+                    cv2.line(out, (x0, y0), (x1, y1), color, 1)
+                else:
+                    cv2.line(out, (x1, y0), (x0, y1), color, 1)
     return out
 
 # ---------------------------
