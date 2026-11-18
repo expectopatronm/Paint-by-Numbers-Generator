@@ -411,6 +411,9 @@ DEFAULT_CONFIG = {
     # image below upscale_ok_min_long, a final Lanczos resize reaches it.
     "supir_max_upscale": 2,
     "supir_finish_to_threshold": True,
+    # Reuse a valid SUPIR output when it is newer than the source image.
+    # Set False to force SUPIR to regenerate after changing SUPIR settings.
+    "supir_reuse_cached": True,
     "supir_min_size": 1024,
     "supir_edm_steps": 50,
     "supir_s_noise": 1.02,
