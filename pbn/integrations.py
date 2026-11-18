@@ -101,6 +101,39 @@ def _resize_to_min_long_side(input_path: str, min_long_side: int) -> str:
     return output_path
 
 
+def _is_fresh_cached_image(
+    image_path: str,
+    dependencies: Sequence[str],
+    *,
+    min_long_side: int | None = None,
+) -> bool:
+    """Check that a cached image is valid and newer than its dependencies.
+
+    Args:
+        image_path: Candidate cached image.
+        dependencies: Files whose modification times invalidate the cache.
+        min_long_side: Optional minimum size for the cached image's longest edge.
+
+    Returns:
+        ``True`` when the cache can safely be reused.
+    """
+    if not os.path.isfile(image_path):
+        return False
+    try:
+        cache_time = os.path.getmtime(image_path)
+        if any(cache_time < os.path.getmtime(path) for path in dependencies):
+            return False
+        with Image.open(image_path) as image:
+            image.verify()
+        if min_long_side is not None:
+            with Image.open(image_path) as image:
+                if max(image.size) < min_long_side:
+                    return False
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def _maybe_upscale_with_supir(input_path: str,
                               *,
                               enable: bool,
@@ -247,6 +280,30 @@ def _maybe_upscale_input(input_path: str, args) -> str:
         )
         scale = max_scale
 
+    finish_to_threshold = bool(getattr(args, "supir_finish_to_threshold", True))
+    reuse_cached = bool(getattr(args, "supir_reuse_cached", True))
+    source_root = os.path.splitext(os.path.abspath(input_path))[0]
+    raw_cache = f"{source_root}.supirx{scale}.png"
+    final_cache = (
+        f"{os.path.splitext(raw_cache)[0]}.{ok_min}px.png"
+        if finish_to_threshold
+        else raw_cache
+    )
+    if reuse_cached:
+        final_dependencies = [input_path]
+        if final_cache != raw_cache and os.path.isfile(raw_cache):
+            final_dependencies.append(raw_cache)
+        if _is_fresh_cached_image(
+            final_cache,
+            final_dependencies,
+            min_long_side=ok_min if finish_to_threshold else None,
+        ):
+            print(f"Reusing cached SUPIR image: {final_cache}")
+            return final_cache
+        if finish_to_threshold and _is_fresh_cached_image(raw_cache, [input_path]):
+            print(f"Reusing cached SUPIR restoration: {raw_cache}")
+            return _resize_to_min_long_side(raw_cache, ok_min)
+
     prioritizing = str(getattr(args, "supir_prioritizing", "Quality")).lower()
     texture = float(getattr(args, "supir_texture_richness", 1.0))
     creativity = float(getattr(args, "supir_creativity", 0.0))
@@ -294,7 +351,7 @@ def _maybe_upscale_input(input_path: str, args) -> str:
     )
     if result == input_path and longest < ok_min:
         raise RuntimeError("SUPIR did not produce an upscaled image; no original-image fallback is allowed.")
-    if bool(getattr(args, "supir_finish_to_threshold", True)):
+    if finish_to_threshold:
         result = _resize_to_min_long_side(result, ok_min)
     return result
 
