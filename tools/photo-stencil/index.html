@@ -13,56 +13,79 @@
 <body>
   <header class="topbar">
     <h1>Photo Stencil</h1>
-    <button id="open" type="button">Open image</button>
-    <input id="file" type="file" accept="image/*" hidden>
-    <button id="save" class="primary" type="button" disabled>Download PNG</button>
+    <div class="actions">
+      <button id="open" type="button">Open image</button>
+      <input id="file" type="file" accept="image/*" hidden>
+      <button id="save" class="primary" type="button" disabled>Download PNG</button>
+    </div>
   </header>
   <main>
-    <aside>
-      <fieldset>
-        <legend>Tracing mode</legend>
-        <label class="mode"><input type="radio" name="mode" value="edges" checked> Edges</label>
-        <label class="mode"><input type="radio" name="mode" value="adaptive"> Adaptive</label>
-      </fieldset>
-      <p id="mode-description">Trace changes in brightness as black lines.</p>
-
-      <label class="slider-label" for="tone">Darkness <output id="tone-value" for="tone"></output></label>
-      <input id="tone" class="tone" type="range" min="0" max="255" step="1" value="128">
-      <div class="scale"><span>Darker</span><span>Lighter</span></div>
-
-      <label class="slider-label" for="softness">Softness <output id="softness-value" for="softness"></output></label>
-      <input id="softness" type="range" min="0" max="4" step="0.1" value="1">
-      <div class="scale"><span>Sharp</span><span>Soft</span></div>
-
-      <label class="slider-label" for="grain">Grain removal <output id="grain-value" for="grain">Off</output></label>
-      <input id="grain" type="range" min="0" max="5" step="1" value="0" aria-describedby="grain-hint">
-      <p id="grain-hint" class="control-hint">Smooths fine texture before tracing.</p>
-
-      <label class="slider-label" for="noise">Noise reduction <output id="noise-value" for="noise">Off</output></label>
-      <input id="noise" type="range" min="0" max="5" step="1" value="0" aria-describedby="noise-hint">
-      <p id="noise-hint" class="control-hint">Removes small, disconnected marks.</p>
-
-      <label id="outline-field" class="outline" hidden><input id="outline" type="checkbox"> Outline black areas</label>
-    </aside>
     <section class="workspace" aria-label="Image comparison">
-      <p id="status" role="status">Open or drop an image to start tracing.</p>
+      <p class="empty">Open or drop an image to start tracing.</p>
       <div class="views" hidden>
         <figure>
           <figcaption>Original</figcaption>
-          <div class="viewport"><canvas id="original" aria-label="Original image"></canvas></div>
+          <div class="preview-pane">
+            <div class="viewport"><canvas id="original" aria-label="Original image"></canvas></div>
+          </div>
         </figure>
         <figure>
           <figcaption>Stencil</figcaption>
-          <div class="viewport"><canvas id="result" aria-label="Stencil result"></canvas></div>
+          <div class="preview-pane">
+            <div class="viewport"><canvas id="result" aria-label="Stencil result"></canvas></div>
+            <div id="zoom-tools" role="group" aria-label="Controls for both previews">
+              <button id="zoom-out" type="button" aria-label="Zoom out" title="Zoom out" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M7.5 10.5h6M15.5 15.5 21 21"/></svg>
+              </button>
+              <button id="zoom-in" type="button" aria-label="Zoom in" title="Zoom in">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M7.5 10.5h6m-3-3v6m5 2L21 21"/></svg>
+              </button>
+              <button id="fit" type="button" aria-label="Fit previews to view" title="Fit to view" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4"/><rect x="8" y="8" width="8" height="8"/></svg>
+              </button>
+              <button id="pan" type="button" aria-label="Drag to pan previews" title="Drag to pan" aria-pressed="false" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 12V6a1.5 1.5 0 0 1 3 0v4-6a1.5 1.5 0 0 1 3 0v6-4a1.5 1.5 0 0 1 3 0v5-2a1.5 1.5 0 0 1 3 0v6a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-3l-3-4a1.6 1.6 0 0 1 2.5-2L8 13"/></svg>
+              </button>
+              <output id="zoom-value" aria-label="Preview zoom">100%</output>
+            </div>
+          </div>
         </figure>
       </div>
-      <div id="zoom-tools" hidden>
-        <label for="zoom">Preview zoom</label>
-        <input id="zoom" type="range" min="1" max="8" step="0.05" value="1">
-        <button id="fit" type="button" aria-label="Fit previews to view">Fit</button>
-        <output id="zoom-value" for="zoom">100%</output>
-      </div>
     </section>
+    <div class="finish">
+      <section class="controls" aria-label="Stencil settings">
+        <div class="original-tools">
+          <fieldset class="modes" aria-describedby="mode-description">
+            <legend class="sr-only">Tracing mode</legend>
+            <label class="mode"><input type="radio" name="mode" value="edges" checked><span>Edges</span></label>
+            <label class="mode"><input type="radio" name="mode" value="adaptive"><span>Adaptive</span></label>
+          </fieldset>
+          <p id="mode-description" class="sr-only">Trace changes in brightness as black lines.</p>
+          <p id="status" role="status"></p>
+        </div>
+        <div class="stencil-tools">
+          <div class="field">
+            <label for="tone">Darkness <output id="tone-value" for="tone"></output></label>
+            <input id="tone" type="range" min="0" max="255" step="1" value="128">
+          </div>
+          <div class="field">
+            <label for="softness">Softness <output id="softness-value" for="softness"></output></label>
+            <input id="softness" type="range" min="0" max="4" step="0.1" value="1">
+          </div>
+          <div class="field">
+            <label for="grain">Grain removal <output id="grain-value" for="grain">Off</output></label>
+            <input id="grain" type="range" min="0" max="5" step="1" value="0" aria-describedby="grain-hint">
+            <span id="grain-hint" class="sr-only">Smooths fine texture before tracing.</span>
+          </div>
+          <div class="field">
+            <label for="noise">Noise reduction <output id="noise-value" for="noise">Off</output></label>
+            <input id="noise" type="range" min="0" max="5" step="1" value="0" aria-describedby="noise-hint">
+            <span id="noise-hint" class="sr-only">Removes small, disconnected marks.</span>
+          </div>
+          <label id="outline-field" class="outline" hidden><input id="outline" type="checkbox"> Outline black areas</label>
+        </div>
+      </section>
+    </div>
   </main>
 </body>
 </html>

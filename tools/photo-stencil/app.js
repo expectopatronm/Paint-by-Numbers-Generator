@@ -1,5 +1,8 @@
 "use strict";
 
+const frame = new URLSearchParams(location.search).get("frame");
+if (frame === "inset" || frame === "panel") document.documentElement.dataset.frame = frame;
+
 const byId = id => document.getElementById(id);
 const file = byId("file");
 const save = byId("save");
@@ -8,7 +11,10 @@ const softness = byId("softness");
 const grain = byId("grain");
 const noise = byId("noise");
 const outline = byId("outline");
-const zoom = byId("zoom");
+const zoomOut = byId("zoom-out");
+const zoomIn = byId("zoom-in");
+const fit = byId("fit");
+const pan = byId("pan");
 const status = byId("status");
 const original = byId("original");
 const result = byId("result");
@@ -25,8 +31,11 @@ const settings = {
   adaptive: { mode: "adaptive", tone: 32, softness: 1, grain: 0, noise: 0, outline: false },
 };
 const maxPixels = 4_000_000;
+const zoomLevels = [1, 1.25, 1.5, 2, 3, 4, 6, 8];
 let resizer;
 let mode = "edges";
+let zoomIndex = 0;
+let panEnabled = true;
 let source;
 let target;
 let fileName;
@@ -63,14 +72,33 @@ function updateControls() {
   byId("outline-field").hidden = mode !== "adaptive";
 }
 
-function updateZoom() {
-  const scale = Number(zoom.value);
+function updatePan() {
+  const canPan = zoomIndex > 0 && panEnabled;
+  views.classList.toggle("can-pan", canPan);
+  pan.disabled = zoomIndex === 0;
+  pan.setAttribute("aria-pressed", String(canPan));
+}
+
+function setZoom(index) {
+  const viewport = viewports[0];
+  const before = original.getBoundingClientRect();
+  const centerX = (viewport.scrollLeft + viewport.clientWidth / 2) / before.width;
+  const centerY = (viewport.scrollTop + viewport.clientHeight / 2) / before.height;
+  zoomIndex = Math.max(0, Math.min(zoomLevels.length - 1, index));
+  const scale = zoomLevels[zoomIndex];
   byId("zoom-value").value = `${Math.round(scale * 100)}%`;
-  for (const [index, viewport] of viewports.entries()) {
-    const canvas = index === 0 ? original : result;
-    const fit = Math.min(viewport.clientWidth / canvas.width, viewport.clientHeight / canvas.height);
-    canvas.style.width = `${canvas.width * fit * scale}px`;
-    canvas.style.height = `${canvas.height * fit * scale}px`;
+  views.style.setProperty("--preview-zoom", scale);
+  views.classList.toggle("is-zoomed", scale > 1);
+  zoomOut.disabled = scale === 1;
+  fit.disabled = scale === 1;
+  zoomIn.disabled = zoomIndex === zoomLevels.length - 1;
+  updatePan();
+  for (const pane of viewports) {
+    const image = pane.firstElementChild.getBoundingClientRect();
+    pane.scrollTo(
+      scale === 1 ? 0 : centerX * image.width - pane.clientWidth / 2,
+      scale === 1 ? 0 : centerY * image.height - pane.clientHeight / 2,
+    );
   }
 }
 
@@ -111,9 +139,9 @@ async function openImage(input) {
     target = resultContext.createImageData(width, height);
     fileName = input.name;
     render();
-    zoom.value = 1;
-    views.hidden = byId("zoom-tools").hidden = false;
-    updateZoom();
+    views.closest("main").style.setProperty("--image-ratio", width / height);
+    views.hidden = false;
+    setZoom(0);
     const dimensions = `${width} × ${height} px`;
     status.textContent = `${fileName} · ${dimensions}${scale < 1 ? " · resized for tracing" : ""}`;
   } catch {
@@ -179,20 +207,39 @@ save.addEventListener("click", () => {
   }, "image/png");
 });
 
-zoom.addEventListener("input", updateZoom);
-byId("fit").addEventListener("click", () => {
-  zoom.value = 1;
-  updateZoom();
-  viewports.forEach(viewport => viewport.scrollTo(0, 0));
+zoomOut.addEventListener("click", () => setZoom(zoomIndex - 1));
+zoomIn.addEventListener("click", () => setZoom(zoomIndex + 1));
+fit.addEventListener("click", () => setZoom(0));
+pan.addEventListener("click", () => {
+  panEnabled = !panEnabled;
+  updatePan();
 });
-new ResizeObserver(() => {
-  if (!views.hidden) updateZoom();
-}).observe(views);
+
 for (const [index, viewport] of viewports.entries()) {
   viewport.addEventListener("scroll", () => {
     const other = viewports[1 - index];
     other.scrollLeft = viewport.scrollLeft;
     other.scrollTop = viewport.scrollTop;
+  });
+  let drag;
+  viewport.addEventListener("pointerdown", event => {
+    if (!views.classList.contains("can-pan") || !event.isPrimary
+        || event.button !== 0 || event.target !== viewport.firstElementChild) return;
+    drag = {
+      id: event.pointerId,
+      x: event.clientX + viewport.scrollLeft,
+      y: event.clientY + viewport.scrollTop,
+    };
+    viewport.setPointerCapture(drag.id);
+    viewport.classList.add("is-panning");
+  });
+  viewport.addEventListener("pointermove", event => {
+    if (drag?.id !== event.pointerId) return;
+    viewport.scrollTo(drag.x - event.clientX, drag.y - event.clientY);
+  });
+  viewport.addEventListener("lostpointercapture", () => {
+    drag = undefined;
+    viewport.classList.remove("is-panning");
   });
 }
 
