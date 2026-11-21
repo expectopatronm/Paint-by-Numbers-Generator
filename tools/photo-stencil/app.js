@@ -1,0 +1,174 @@
+"use strict";
+
+const byId = id => document.getElementById(id);
+const file = byId("file");
+const save = byId("save");
+const tone = byId("tone");
+const softness = byId("softness");
+const outline = byId("outline");
+const zoom = byId("zoom");
+const status = byId("status");
+const original = byId("original");
+const result = byId("result");
+const views = document.querySelector(".views");
+const viewports = [...document.querySelectorAll(".viewport")];
+const originalContext = original.getContext("2d", { willReadFrequently: true });
+const resultContext = result.getContext("2d");
+const descriptions = {
+  edges: "Trace changes in brightness as black lines.",
+  adaptive: "Separate light and dark areas using the brightness around each pixel.",
+};
+const settings = {
+  edges: { mode: "edges", tone: 128, softness: 1, outline: false },
+  adaptive: { mode: "adaptive", tone: 32, softness: 1, outline: false },
+};
+const maxPixels = 4_000_000;
+let mode = "edges";
+let source;
+let target;
+let fileName;
+let pending;
+let loadId = 0;
+
+function render() {
+  clearTimeout(pending);
+  if (!source) return;
+  Stencil.render(source, settings[mode], target);
+  resultContext.putImageData(target, 0, 0);
+}
+
+function scheduleRender() {
+  clearTimeout(pending);
+  if (source) pending = setTimeout(render, 55);
+}
+
+function updateControls() {
+  const current = settings[mode];
+  tone.value = current.tone;
+  softness.value = current.softness;
+  outline.checked = current.outline;
+  byId("tone-value").value = current.tone;
+  byId("softness-value").value = current.softness.toFixed(1);
+  byId("mode-description").textContent = descriptions[mode];
+  byId("outline-field").hidden = mode !== "adaptive";
+}
+
+function updateZoom() {
+  const scale = Number(zoom.value);
+  byId("zoom-value").value = `${Math.round(scale * 100)}%`;
+  for (const [index, viewport] of viewports.entries()) {
+    const canvas = index === 0 ? original : result;
+    const fit = Math.min(viewport.clientWidth / canvas.width, viewport.clientHeight / canvas.height);
+    canvas.style.width = `${canvas.width * fit * scale}px`;
+    canvas.style.height = `${canvas.height * fit * scale}px`;
+  }
+}
+
+async function openImage(input) {
+  const id = ++loadId;
+  status.textContent = "Opening image…";
+  save.disabled = true;
+  const url = URL.createObjectURL(input);
+  const image = new Image();
+  try {
+    image.src = url;
+    await image.decode();
+    if (id !== loadId) return;
+    const { naturalWidth, naturalHeight } = image;
+    const scale = Math.min(1, Math.sqrt(maxPixels / (naturalWidth * naturalHeight)),
+      8192 / Math.max(naturalWidth, naturalHeight));
+    const width = Math.max(1, Math.floor(naturalWidth * scale));
+    const height = Math.max(1, Math.floor(naturalHeight * scale));
+    original.width = result.width = width;
+    original.height = result.height = height;
+    originalContext.fillStyle = "#fff";
+    originalContext.fillRect(0, 0, width, height);
+    originalContext.drawImage(image, 0, 0, width, height);
+    source = originalContext.getImageData(0, 0, width, height);
+    target = resultContext.createImageData(width, height);
+    fileName = input.name;
+    render();
+    zoom.value = 1;
+    views.hidden = byId("zoom-tools").hidden = false;
+    updateZoom();
+    const dimensions = `${width} × ${height} px`;
+    status.textContent = `${fileName} · ${dimensions}${scale < 1 ? " · resized for tracing" : ""}`;
+  } catch {
+    if (id === loadId) status.textContent = "Could not open this file. Choose a PNG, JPEG, or another supported image.";
+  } finally {
+    URL.revokeObjectURL(url);
+    if (id === loadId) save.disabled = !source;
+  }
+}
+
+document.querySelectorAll('input[name="mode"]').forEach(radio => {
+  radio.addEventListener("change", () => {
+    mode = radio.value;
+    updateControls();
+    scheduleRender();
+  });
+});
+for (const control of [tone, softness, outline]) {
+  control.addEventListener("input", () => {
+    settings[mode].tone = Number(tone.value);
+    settings[mode].softness = Number(softness.value);
+    settings[mode].outline = outline.checked;
+    updateControls();
+    scheduleRender();
+  });
+}
+
+byId("open").addEventListener("click", () => file.click());
+file.addEventListener("change", () => {
+  if (file.files.length) openImage(file.files[0]);
+  file.value = "";
+});
+document.addEventListener("dragover", event => {
+  if (!event.dataTransfer.types.includes("Files")) return;
+  event.preventDefault();
+  document.body.classList.add("dragging");
+});
+document.addEventListener("dragleave", event => {
+  if (!event.relatedTarget) document.body.classList.remove("dragging");
+});
+document.addEventListener("drop", event => {
+  if (!event.dataTransfer.files.length) return;
+  event.preventDefault();
+  document.body.classList.remove("dragging");
+  openImage(event.dataTransfer.files[0]);
+});
+
+save.addEventListener("click", () => {
+  render();
+  const name = `${fileName.replace(/\.[^.]+$/, "")}-${mode}.png`;
+  result.toBlob(blob => {
+    if (!blob) {
+      status.textContent = "Could not create the PNG.";
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  }, "image/png");
+});
+
+zoom.addEventListener("input", updateZoom);
+byId("fit").addEventListener("click", () => {
+  zoom.value = 1;
+  updateZoom();
+  viewports.forEach(viewport => viewport.scrollTo(0, 0));
+});
+new ResizeObserver(() => {
+  if (!views.hidden) updateZoom();
+}).observe(views);
+for (const [index, viewport] of viewports.entries()) {
+  viewport.addEventListener("scroll", () => {
+    const other = viewports[1 - index];
+    other.scrollLeft = viewport.scrollLeft;
+    other.scrollTop = viewport.scrollTop;
+  });
+}
+
+updateControls();

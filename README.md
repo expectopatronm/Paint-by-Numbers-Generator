@@ -508,6 +508,15 @@ external_sketch = "pics/my_sketch.png"
 
 Use dark lines on a light background. The sketch will be resized to the source image size.
 
+### Create a Sketch With Photo Stencil
+
+From a local checkout, open [tools/photo-stencil/index.html](tools/photo-stencil/index.html) in your browser and load a photo. The tool processes images locally.
+
+- **Edges** traces changes in brightness as black lines.
+- **Adaptive** separates lights and shadows based on nearby pixels. Turn on **Outline** to trace the boundaries of the dark areas.
+
+Adjust **Darkness** and **Softness** while comparing the source and result. Download the PNG and use its path as `external_sketch` in [pbn/config.py](pbn/config.py). The tool scales down images larger than 4 megapixels or 8192 pixels on either side.
+
 ### Change Number Of Colors
 
 Simpler:

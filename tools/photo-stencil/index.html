@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Photo Stencil</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="vendor/jsfeat-0.0.8.min.js"></script>
+  <script defer src="tracing.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>Photo Stencil</h1>
+    <button id="open" type="button">Open image</button>
+    <input id="file" type="file" accept="image/*" hidden>
+    <button id="save" class="primary" type="button" disabled>Download PNG</button>
+  </header>
+  <main>
+    <aside>
+      <fieldset>
+        <legend>Tracing mode</legend>
+        <label class="mode"><input type="radio" name="mode" value="edges" checked> Edges</label>
+        <label class="mode"><input type="radio" name="mode" value="adaptive"> Adaptive</label>
+      </fieldset>
+      <p id="mode-description">Trace changes in brightness as black lines.</p>
+
+      <label class="slider-label" for="tone">Darkness <output id="tone-value" for="tone"></output></label>
+      <input id="tone" class="tone" type="range" min="0" max="255" step="1" value="128">
+      <div class="scale"><span>Darker</span><span>Lighter</span></div>
+
+      <label class="slider-label" for="softness">Softness <output id="softness-value" for="softness"></output></label>
+      <input id="softness" type="range" min="0" max="4" step="0.1" value="1">
+      <div class="scale"><span>Sharp</span><span>Soft</span></div>
+
+      <label id="outline-field" class="outline" hidden><input id="outline" type="checkbox"> Outline black areas</label>
+    </aside>
+    <section class="workspace" aria-label="Image comparison">
+      <p id="status" role="status">Open or drop an image to start tracing.</p>
+      <div class="views" hidden>
+        <figure>
+          <figcaption>Original</figcaption>
+          <div class="viewport"><canvas id="original" aria-label="Original image"></canvas></div>
+        </figure>
+        <figure>
+          <figcaption>Stencil</figcaption>
+          <div class="viewport"><canvas id="result" aria-label="Stencil result"></canvas></div>
+        </figure>
+      </div>
+      <div id="zoom-tools" hidden>
+        <label for="zoom">Preview zoom</label>
+        <input id="zoom" type="range" min="1" max="8" step="0.05" value="1">
+        <button id="fit" type="button" aria-label="Fit previews to view">Fit</button>
+        <output id="zoom-value" for="zoom">100%</output>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
