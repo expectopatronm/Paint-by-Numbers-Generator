@@ -33,6 +33,24 @@ That is why the output is a workbook rather than a single image.
 
 ---
 
+## Photo Stencil
+
+Photo Stencil is the browser tool for preparing the black-and-white sketch you’ll transfer to canvas. Compare the photo and trace side by side, zoom and pan both previews together, and adjust grain and speckle removal before downloading the PNG.
+
+<p align="center">
+  <img src="docs/readme/14-photo-stencil-workspace.png" width="94%" alt="Photo Stencil showing a photograph of a sculpture beside its Edges trace, with the cleanup controls and in-preview zoom toolbar" />
+</p>
+
+**Edges** follows fine contours, while **Adaptive** uses local brightness to create a bolder stencil. The roofline and window trim in this example show the difference.
+
+<p align="center">
+  <img src="docs/readme/15-photo-stencil-mode-comparison.png" width="94%" alt="A color photograph of a row of dormer windows compared with the fine lines of Edges mode and the heavier black shapes of Adaptive mode" />
+</p>
+
+Open [Photo Stencil](tools/photo-stencil/index.html) from your local checkout. To use the exported PNG in the workbook, see [Create a Sketch With Photo Stencil](#create-a-sketch-with-photo-stencil).
+
+---
+
 ## The Current Output
 
 The generator creates an A4 landscape PDF. A current run has this broad structure:
