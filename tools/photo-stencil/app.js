@@ -5,6 +5,8 @@ const file = byId("file");
 const save = byId("save");
 const tone = byId("tone");
 const softness = byId("softness");
+const grain = byId("grain");
+const noise = byId("noise");
 const outline = byId("outline");
 const zoom = byId("zoom");
 const status = byId("status");
@@ -12,17 +14,18 @@ const original = byId("original");
 const result = byId("result");
 const views = document.querySelector(".views");
 const viewports = [...document.querySelectorAll(".viewport")];
-const originalContext = original.getContext("2d", { willReadFrequently: true });
+const originalContext = original.getContext("2d");
 const resultContext = result.getContext("2d");
 const descriptions = {
   edges: "Trace changes in brightness as black lines.",
   adaptive: "Separate light and dark areas using the brightness around each pixel.",
 };
 const settings = {
-  edges: { mode: "edges", tone: 128, softness: 1, outline: false },
-  adaptive: { mode: "adaptive", tone: 32, softness: 1, outline: false },
+  edges: { mode: "edges", tone: 128, softness: 1, grain: 0, noise: 0, outline: false },
+  adaptive: { mode: "adaptive", tone: 32, softness: 1, grain: 0, noise: 0, outline: false },
 };
 const maxPixels = 4_000_000;
+let resizer;
 let mode = "edges";
 let source;
 let target;
@@ -49,6 +52,13 @@ function updateControls() {
   outline.checked = current.outline;
   byId("tone-value").value = current.tone;
   byId("softness-value").value = current.softness.toFixed(1);
+  for (const control of [grain, noise]) {
+    const value = current[control.id];
+    const label = value ? String(value) : "Off";
+    control.value = value;
+    byId(`${control.id}-value`).value = label;
+    control.setAttribute("aria-valuetext", label);
+  }
   byId("mode-description").textContent = descriptions[mode];
   byId("outline-field").hidden = mode !== "adaptive";
 }
@@ -64,6 +74,18 @@ function updateZoom() {
   }
 }
 
+async function resizeForTracing(image, width, height) {
+  const fullSize = document.createElement("canvas");
+  fullSize.width = image.naturalWidth;
+  fullSize.height = image.naturalHeight;
+  fullSize.getContext("2d").drawImage(image, 0, 0);
+  const resized = document.createElement("canvas");
+  resized.width = width;
+  resized.height = height;
+  resizer ??= pica();
+  return resizer.resize(fullSize, resized);
+}
+
 async function openImage(input) {
   const id = ++loadId;
   status.textContent = "Opening image…";
@@ -75,15 +97,16 @@ async function openImage(input) {
     await image.decode();
     if (id !== loadId) return;
     const { naturalWidth, naturalHeight } = image;
-    const scale = Math.min(1, Math.sqrt(maxPixels / (naturalWidth * naturalHeight)),
-      8192 / Math.max(naturalWidth, naturalHeight));
+    const scale = Math.min(1, Math.sqrt(maxPixels / (naturalWidth * naturalHeight)));
     const width = Math.max(1, Math.floor(naturalWidth * scale));
     const height = Math.max(1, Math.floor(naturalHeight * scale));
+    const prepared = scale < 1 ? await resizeForTracing(image, width, height) : image;
+    if (id !== loadId) return;
     original.width = result.width = width;
     original.height = result.height = height;
     originalContext.fillStyle = "#fff";
     originalContext.fillRect(0, 0, width, height);
-    originalContext.drawImage(image, 0, 0, width, height);
+    originalContext.drawImage(prepared, 0, 0);
     source = originalContext.getImageData(0, 0, width, height);
     target = resultContext.createImageData(width, height);
     fileName = input.name;
@@ -108,10 +131,12 @@ document.querySelectorAll('input[name="mode"]').forEach(radio => {
     scheduleRender();
   });
 });
-for (const control of [tone, softness, outline]) {
+for (const control of [tone, softness, grain, noise, outline]) {
   control.addEventListener("input", () => {
     settings[mode].tone = Number(tone.value);
     settings[mode].softness = Number(softness.value);
+    settings[mode].grain = Number(grain.value);
+    settings[mode].noise = Number(noise.value);
     settings[mode].outline = outline.checked;
     updateControls();
     scheduleRender();

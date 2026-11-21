@@ -58,14 +58,15 @@ legend { padding: 0; margin-bottom: 0.55rem; font-weight: 650; }
 .mode { padding-inline: 0.45rem; border-radius: 0.4rem; cursor: pointer; }
 .mode:has(:checked) { background: #dceadf; }
 
-#mode-description, .scale, #status { color: #42564a; }
+#mode-description, .scale, .control-hint, #status { color: #42564a; }
 #mode-description { min-height: 2.75em; font-size: 0.9rem; }
 .slider-label, .scale { display: flex; justify-content: space-between; }
 .slider-label { margin-top: 1.15rem; font-weight: 600; }
 output { font-variant-numeric: tabular-nums; font-weight: normal; }
 input[type="range"] { width: 100%; margin: 0.4rem 0; cursor: pointer; }
 .tone { background: linear-gradient(90deg, #111, #fff); border-radius: 1rem; }
-.scale { font-size: 0.875rem; }
+.scale, .control-hint { font-size: 0.875rem; }
+.control-hint { margin: 0; }
 .outline { margin-top: 1rem; }
 
 .workspace { min-width: 0; padding: 1rem; background: #e1e8df; }

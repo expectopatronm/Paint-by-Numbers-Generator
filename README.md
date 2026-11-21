@@ -515,7 +515,7 @@ From a local checkout, open [tools/photo-stencil/index.html](tools/photo-stencil
 - **Edges** traces changes in brightness as black lines.
 - **Adaptive** separates lights and shadows based on nearby pixels. Turn on **Outline** to trace the boundaries of the dark areas.
 
-Adjust **Darkness** and **Softness** while comparing the source and result. Download the PNG and use its path as `external_sketch` in [pbn/config.py](pbn/config.py). The tool scales down images larger than 4 megapixels or 8192 pixels on either side.
+Adjust **Darkness** and **Softness** while comparing the source and result. Use **Grain removal** to smooth fine texture before tracing and **Noise reduction** to remove small, disconnected marks afterward. Download the PNG and use its path as `external_sketch` in [pbn/config.py](pbn/config.py). The tool scales down images larger than 4 megapixels.
 
 ### Change Number Of Colors
 

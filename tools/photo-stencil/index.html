@@ -6,6 +6,7 @@
   <title>Photo Stencil</title>
   <link rel="stylesheet" href="style.css">
   <script defer src="vendor/jsfeat-0.0.8.min.js"></script>
+  <script defer src="vendor/pica-6.1.1.min.js"></script>
   <script defer src="tracing.js"></script>
   <script defer src="app.js"></script>
 </head>
@@ -32,6 +33,14 @@
       <label class="slider-label" for="softness">Softness <output id="softness-value" for="softness"></output></label>
       <input id="softness" type="range" min="0" max="4" step="0.1" value="1">
       <div class="scale"><span>Sharp</span><span>Soft</span></div>
+
+      <label class="slider-label" for="grain">Grain removal <output id="grain-value" for="grain">Off</output></label>
+      <input id="grain" type="range" min="0" max="5" step="1" value="0" aria-describedby="grain-hint">
+      <p id="grain-hint" class="control-hint">Smooths fine texture before tracing.</p>
+
+      <label class="slider-label" for="noise">Noise reduction <output id="noise-value" for="noise">Off</output></label>
+      <input id="noise" type="range" min="0" max="5" step="1" value="0" aria-describedby="noise-hint">
+      <p id="noise-hint" class="control-hint">Removes small, disconnected marks.</p>
 
       <label id="outline-field" class="outline" hidden><input id="outline" type="checkbox"> Outline black areas</label>
     </aside>
